@@ -2,6 +2,15 @@ name: Build GhosttyKit
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'pkg/**'
+      - 'vendor/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'build.zig.zon.json'
 
 jobs:
   build:
