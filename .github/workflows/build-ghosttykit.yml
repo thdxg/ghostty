@@ -27,12 +27,21 @@ jobs:
           version: 0.15.2
 
       - name: Build xcframework
-        run: zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false
+        run: zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true
 
       - name: Compress xcframework
         run: |
           cd macos
           tar czf GhosttyKit.xcframework.tar.gz GhosttyKit.xcframework/
+
+      # Bundle the themes + shell-integration scripts so Macterm can ship them
+      # in its own app bundle and resolve named themes / shell integration
+      # without a separate Ghostty.app install. The xcframework build installs
+      # these to zig-out/share/ghostty when -Demit-themes=true is set.
+      - name: Compress resources
+        run: |
+          tar czf ghostty-resources.tar.gz \
+            -C zig-out/share/ghostty themes shell-integration
 
       - name: Create release
         env:
@@ -51,4 +60,5 @@ jobs:
             --title "GhosttyKit $(date -u +%Y-%m-%d)" \
             --latest \
             --notes "Built from commit ${COMMIT} on $(date -u +%Y-%m-%d)" \
-            macos/GhosttyKit.xcframework.tar.gz
+            macos/GhosttyKit.xcframework.tar.gz \
+            ghostty-resources.tar.gz
