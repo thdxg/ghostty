@@ -41,7 +41,7 @@ jobs:
             git push --force-with-lease
             exit 0
           fi
-          git diff upstream/main..HEAD > /tmp/downstream.patch
+          git diff --binary upstream/main..HEAD > /tmp/downstream.patch
 
           # Rebuild main as: upstream HEAD + one commit carrying the whole delta.
           git reset --hard upstream/main
