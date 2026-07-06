@@ -951,6 +951,7 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
+  GHOSTTY_ACTION_OUTPUT_ACTIVITY,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -965,6 +966,7 @@ typedef union {
   ghostty_action_initial_size_s initial_size;
   ghostty_action_cell_size_s cell_size;
   ghostty_action_scrollbar_s scrollbar;
+  ghostty_action_scrollbar_s output_activity;
   ghostty_action_inspector_e inspector;
   ghostty_action_desktop_notification_s desktop_notification;
   ghostty_action_set_title_s set_title;

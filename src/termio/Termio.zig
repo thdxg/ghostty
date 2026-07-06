@@ -67,6 +67,12 @@ terminal_stream: StreamHandler.Stream,
 /// flooding with cursor resets.
 last_cursor_reset: ?std.time.Instant = null,
 
+/// Last time we emitted an output-activity heartbeat. This throttles
+/// the `output_activity` surface message (see processOutputLocked) so
+/// that a program producing a continuous stream of output only pokes
+/// the app thread a few times a second instead of once per pty chunk.
+last_output_activity: ?std.time.Instant = null,
+
 /// State we have for thread enter. This may be null if we don't need
 /// to keep track of any state or if its already been freed.
 thread_enter_state: ?*ThreadEnterState = null,
@@ -667,6 +673,43 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
         self.last_cursor_reset = now;
         _ = self.renderer_mailbox.push(.{
             .reset_cursor_blink = {},
+        }, .{ .instant = {} });
+    } else |err| {
+        log.warn("failed to get current time err={}", .{err});
+    }
+
+    // Emit a throttled "output activity" heartbeat to the app thread.
+    //
+    // This is a signal that the child/pty produced output. We route it
+    // through the SURFACE mailbox (app-tick -> performAction) rather than
+    // the renderer thread on purpose: the renderer parks itself while the
+    // surface is occluded (ghostty_surface_set_occlusion), which stops
+    // renderer-track signals like the .scrollbar action. Embedders that
+    // want an occlusion-independent activity signal (e.g. a tab spinner
+    // for in-place TUI redraws or fully backgrounded tabs) need something
+    // that keeps firing regardless of visibility, so it lives here on the
+    // IO path where every pty read chunk passes through.
+    //
+    // We throttle to at most once per 500ms because a program under heavy
+    // output would otherwise flood the app thread with one message per
+    // chunk. The Instant.now()+compare runs per chunk (cheap); the
+    // scrollbar read (which walks the page list) only happens when we
+    // actually emit. The first chunk after a quiet period emits
+    // immediately.
+    if (std.time.Instant.now()) |now| output_activity: {
+        if (self.last_output_activity) |last| {
+            if (now.since(last) <= (500 * std.time.ns_per_ms)) {
+                break :output_activity;
+            }
+        }
+
+        self.last_output_activity = now;
+
+        // We hold the renderer state mutex here, so it is safe to read
+        // the active screen's scrollbar geometry directly.
+        const scrollbar = self.renderer_state.terminal.screens.active.pages.scrollbar();
+        _ = self.surface_mailbox.push(.{
+            .output_activity = scrollbar,
         }, .{ .instant = {} });
     } else |err| {
         log.warn("failed to get current time err={}", .{err});
