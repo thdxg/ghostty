@@ -67,7 +67,6 @@
 const SelectionGesture = @This();
 
 const std = @import("std");
-const builtin = @import("builtin");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -80,16 +79,6 @@ const Selection = @import("Selection.zig");
 const Terminal = @import("Terminal.zig");
 const point = @import("point.zig");
 
-const freestanding_wasm = builtin.target.cpu.arch == .wasm32 and
-    builtin.target.os.tag == .freestanding;
-
-/// Monotonic timestamp type for click-repeat detection.
-///
-/// Freestanding wasm cannot reference std.time.Instant because Zig's stdlib
-/// Instant type depends on POSIX timespec for that target, so represent the C
-/// API nanosecond timestamp directly as a u64 there.
-pub const Time = if (freestanding_wasm) u64 else std.time.Instant;
-
 /// The tracked pin of the initial left click along with the screen
 /// that the pin is part of.
 left_click_pin: ?*Pin,
@@ -100,7 +89,7 @@ left_click_screen_generation: usize,
 /// The left click time was the last time the left click was done, if the
 /// caller could provide one. If this is null then we only support single clicks.
 left_click_count: u3,
-left_click_time: ?Time,
+left_click_time: ?std.time.Instant,
 
 /// The selection behavior chosen for the active left-click gesture.
 left_click_behavior: Behavior,
@@ -228,11 +217,10 @@ pub fn validatedLeftClickPin(
 }
 
 pub const Press = struct {
-    /// The time when the press event occurred. Prefer a monotonic timer;
-    /// backwards timestamps reset the repeat sequence.
+    /// The time when the press event occurred. Use a monotonic timer.
     /// This can be null if you're on a system that doesn't support
     /// time for some reason. In that case, we only support single clicks.
-    time: ?Time,
+    time: ?std.time.Instant,
 
     /// The cell where the click was.
     ///
@@ -388,8 +376,8 @@ pub fn drag(
         .cell => dragSelection(
             click_pin.*,
             d.pin,
-            pixelFromFloat(self.left_click_xpos),
-            pixelFromFloat(d.xpos),
+            @intFromFloat(@max(0, self.left_click_xpos)),
+            @intFromFloat(@max(0, d.xpos)),
             d.rectangle,
             d.geometry,
         ),
@@ -631,8 +619,7 @@ fn pressRepeat(
     const time = p.time orelse return error.PressRequiresReset;
     {
         const prev_time = self.left_click_time orelse return error.PressRequiresReset;
-        const since = timeSince(time, prev_time) orelse
-            return error.PressRequiresReset;
+        const since = time.since(prev_time);
         if (since > p.repeat_interval) return error.PressRequiresReset;
     }
 
@@ -664,29 +651,6 @@ fn pressRepeat(
         3, // We only support triple clicks max
     );
     self.left_click_behavior = p.behaviors[self.left_click_count - 1];
-}
-
-fn timeSince(time: Time, prev_time: Time) ?u64 {
-    if (comptime freestanding_wasm) {
-        if (time < prev_time) return null;
-        return time - prev_time;
-    }
-
-    if (time.order(prev_time) == .lt) return null;
-    return time.since(prev_time);
-}
-
-/// Convert a caller-provided floating-point position to a pixel coordinate.
-/// Negative and NaN values clamp to the origin, matching the drag behavior
-/// outside the left edge of the surface.
-fn pixelFromFloat(value: f64) u32 {
-    if (std.math.isNan(value) or value <= 0) return 0;
-
-    // @intFromFloat requires a value representable by the destination type.
-    // Saturate first so positive infinity and oversized coordinates are safe.
-    const max: f64 = @floatFromInt(std.math.maxInt(u32));
-    if (value >= max) return std.math.maxInt(u32);
-    return @intFromFloat(value);
 }
 
 fn pressSelection(
@@ -733,8 +697,6 @@ fn dragSelection(
     // Rectangular selections are handled similarly, except that
     // entire columns are considered rather than individual cells.
 
-    if (geometry.columns == 0 or geometry.cell_width == 0) return null;
-
     // We only include cells in the selection if the threshold point lies
     // between the start and end points of the selection. A threshold of
     // 60% of the cell width was chosen empirically because it felt good.
@@ -743,12 +705,7 @@ fn dragSelection(
     ));
 
     // We use this to clamp the pixel positions below.
-    const pixel_span = std.math.mul(
-        u32,
-        geometry.columns,
-        geometry.cell_width,
-    ) catch std.math.maxInt(u32);
-    const max_x = pixel_span - 1;
+    const max_x = geometry.columns * geometry.cell_width - 1;
 
     // We need to know how far across in the cell the drag pos is, so
     // we subtract the padding and then take it modulo the cell width.
@@ -959,16 +916,6 @@ fn testPress(t: *Terminal, x: u16, y: u32, time: ?std.time.Instant) Press {
         .max_distance = 1,
         .repeat_interval = std.math.maxInt(u64),
         .word_boundary_codepoints = &.{},
-    };
-}
-
-fn testInstant(ns: u64) std.time.Instant {
-    return switch (builtin.os.tag) {
-        .windows, .uefi, .wasi => .{ .timestamp = ns },
-        else => .{ .timestamp = .{
-            .sec = @intCast(ns / std.time.ns_per_s),
-            .nsec = @intCast(ns % std.time.ns_per_s),
-        } },
     };
 }
 
@@ -1569,58 +1516,6 @@ test "SelectionGesture drag returns selection and records autoscroll" {
     try testing.expectEqual(.down, gesture.left_drag_autoscroll);
 }
 
-test "SelectionGesture drag clamps unrepresentable positions" {
-    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
-    defer t.deinit(testing.allocator);
-
-    var gesture: SelectionGesture = .init;
-    defer gesture.deinit(&t);
-
-    var press_event = testPress(&t, 1, 1, try std.time.Instant.now());
-    press_event.xpos = 10;
-    _ = try gesture.press(&t, press_event);
-
-    const positive = gesture.drag(
-        &t,
-        testDrag(&t, 1, 1, std.math.inf(f64), 50),
-    ).?;
-    try testing.expect((testPin(&t, 1, 1)).eql(positive.start()));
-    try testing.expect((testPin(&t, 1, 1)).eql(positive.end()));
-
-    try testing.expectEqual(null, gesture.drag(
-        &t,
-        testDrag(&t, 1, 1, std.math.nan(f64), 50),
-    ));
-}
-
-test "SelectionGesture drag saturates overflowing geometry" {
-    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
-    defer t.deinit(testing.allocator);
-
-    var gesture: SelectionGesture = .init;
-    defer gesture.deinit(&t);
-
-    _ = try gesture.press(&t, testPress(&t, 1, 1, try std.time.Instant.now()));
-    var drag_event = testDrag(&t, 1, 1, 10, 50);
-    drag_event.geometry.columns = std.math.maxInt(u32);
-    drag_event.geometry.cell_width = std.math.maxInt(u32);
-    try testing.expectEqual(null, gesture.drag(&t, drag_event));
-}
-
-test "SelectionGesture drag rejects empty geometry" {
-    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
-    defer t.deinit(testing.allocator);
-
-    var gesture: SelectionGesture = .init;
-    defer gesture.deinit(&t);
-
-    _ = try gesture.press(&t, testPress(&t, 1, 1, try std.time.Instant.now()));
-    var drag_event = testDrag(&t, 1, 1, 10, 50);
-    drag_event.geometry.columns = 0;
-    drag_event.geometry.cell_width = 0;
-    try testing.expectEqual(null, gesture.drag(&t, drag_event));
-}
-
 test "SelectionGesture release clears autoscroll and records drag" {
     var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
     defer t.deinit(testing.allocator);
@@ -2052,22 +1947,6 @@ test "SelectionGesture expired repeat resets click count" {
     _ = try gesture.press(&t, event);
 
     try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
-}
-
-test "SelectionGesture backwards repeat time resets click count" {
-    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
-    defer t.deinit(testing.allocator);
-
-    var gesture: SelectionGesture = .init;
-    defer gesture.deinit(&t);
-
-    const earlier = testInstant(std.time.ns_per_s);
-    const later = testInstant(2 * std.time.ns_per_s);
-    _ = try gesture.press(&t, testPress(&t, 1, 1, later));
-    _ = try gesture.press(&t, testPress(&t, 1, 1, earlier));
-
-    try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
-    try testing.expectEqual(.eq, gesture.left_click_time.?.order(earlier));
 }
 
 test "SelectionGesture screen switch resets click count" {

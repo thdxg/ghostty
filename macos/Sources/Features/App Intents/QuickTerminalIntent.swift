@@ -20,22 +20,14 @@ struct QuickTerminalIntent: AppIntent {
             throw GhosttyIntentError.appUnavailable
         }
 
-        let wasInitialized = delegate.quickControllerInitialized
-
         // This is safe to call even if it is already shown.
         let c = delegate.quickController
-
         c.animateIn()
 
         // Grab all our terminals
-        var terminals: [TerminalEntity] = []
-        for view in c.surfaceTree.root?.leaves() ?? [] {
-            if wasInitialized {
-                terminals.append(TerminalEntity(view))
-            } else {
-                terminals.append(await TerminalEntity(view: view))
-            }
-        }
+        let terminals = c.surfaceTree.root?.leaves().map {
+            TerminalEntity($0)
+        } ?? []
 
         return .result(value: terminals)
     }

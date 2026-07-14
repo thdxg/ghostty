@@ -1,0 +1,55 @@
+name: Sync Upstream
+
+# Keep this fork exactly ONE commit ahead of ghostty-org/ghostty. Rather than
+# rebasing the downstream commits onto upstream (which re-expands history to N
+# commits every sync), we reset main to upstream and re-commit the entire
+# downstream delta as a single squashed commit. The result is deterministic:
+# `git log upstream/main..main` is always one commit, no matter how many
+# changes the delta contains.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Squash-sync onto upstream
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/ghostty-org/ghostty.git
+          git fetch upstream main
+
+          # Capture the current downstream delta (everything on main that isn't
+          # already in upstream) as a patch. If there's no delta, nothing to do.
+          if git diff --quiet upstream/main..HEAD; then
+            echo "No downstream changes; fast-forwarding to upstream."
+            git reset --hard upstream/main
+            git push --force-with-lease
+            exit 0
+          fi
+          git diff --binary upstream/main..HEAD > /tmp/downstream.patch
+
+          # Rebuild main as: upstream HEAD + one commit carrying the whole delta.
+          git reset --hard upstream/main
+          git apply --index /tmp/downstream.patch
+          git commit -m "ci: downstream GitHub Actions for GhosttyKit builds + upstream sync
+
+          Single squashed commit of all thdxg/ghostty customizations on top of
+          upstream ghostty-org, so the downstream delta is always exactly one
+          commit ahead. Regenerated automatically by sync-upstream.yml."
+
+          git push --force-with-lease

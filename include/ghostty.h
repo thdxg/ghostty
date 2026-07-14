@@ -477,6 +477,9 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  const char* const* command_wrapper;
+  size_t command_wrapper_count;
+  bool disable_shell_integration;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -934,7 +937,6 @@ typedef enum {
   GHOSTTY_ACTION_CONFIG_CHANGE,
   GHOSTTY_ACTION_CLOSE_WINDOW,
   GHOSTTY_ACTION_RING_BELL,
-  GHOSTTY_ACTION_SELECTION_CHANGED,
   GHOSTTY_ACTION_UNDO,
   GHOSTTY_ACTION_REDO,
   GHOSTTY_ACTION_CHECK_FOR_UPDATES,

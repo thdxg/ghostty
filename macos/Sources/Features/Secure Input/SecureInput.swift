@@ -97,11 +97,11 @@ class SecureInput: ObservableObject {
         }
         if err == noErr {
             enabled = desired
-            Self.logger.debug("secure input state=\(self.enabled, privacy: .public)")
+            Self.logger.debug("secure input state=\(self.enabled)")
             return
         }
 
-        Self.logger.warning("secure input apply failed err=\(err, privacy: .public)")
+        Self.logger.warning("secure input apply failed err=\(err)")
     }
 
     // MARK: Notifications
@@ -117,7 +117,7 @@ class SecureInput: ObservableObject {
             return
         }
 
-        Self.logger.warning("secure input apply failed err=\(err, privacy: .public)")
+        Self.logger.warning("secure input apply failed err=\(err)")
     }
 
     @objc private func onDidResignActive(notification: NSNotification) {
@@ -130,6 +130,6 @@ class SecureInput: ObservableObject {
             return
         }
 
-        Self.logger.warning("secure input apply failed err=\(err, privacy: .public)")
+        Self.logger.warning("secure input apply failed err=\(err)")
     }
 }

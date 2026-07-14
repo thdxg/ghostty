@@ -256,7 +256,7 @@ class BaseTerminalController: NSWindowController,
             // If splitting fails for any reason (it should not), then we just log
             // and return. The new view we created will be deinitialized and its
             // no big deal.
-            Ghostty.logger.warning("failed to insert split: \(error, privacy: .public)")
+            Ghostty.logger.warning("failed to insert split: \(error)")
             return nil
         }
 
@@ -730,7 +730,7 @@ class BaseTerminalController: NSWindowController,
         do {
             surfaceTree = try surfaceTree.resizing(node: targetNode, by: amount, in: spatialDirection, with: bounds)
         } catch {
-            Ghostty.logger.warning("failed to resize split: \(error, privacy: .public)")
+            Ghostty.logger.warning("failed to resize split: \(error)")
         }
     }
 
@@ -904,7 +904,7 @@ class BaseTerminalController: NSWindowController,
         do {
             surfaceTree = try surfaceTree.replacing(node: node, with: resizedNode)
         } catch {
-            Ghostty.logger.warning("failed to replace node during split resize: \(error, privacy: .public)")
+            Ghostty.logger.warning("failed to replace node during split resize: \(error)")
         }
     }
 
@@ -929,7 +929,7 @@ class BaseTerminalController: NSWindowController,
             do {
                 newTree = try treeWithoutSource.inserting(view: source, at: destination, direction: direction)
             } catch {
-                Ghostty.logger.warning("failed to insert surface during drop: \(error, privacy: .public)")
+                Ghostty.logger.warning("failed to insert surface during drop: \(error)")
                 return
             }
 
@@ -966,7 +966,7 @@ class BaseTerminalController: NSWindowController,
         do {
             newTree = try surfaceTree.inserting(view: source, at: destination, direction: direction)
         } catch {
-            Ghostty.logger.warning("failed to insert surface during cross-window drop: \(error, privacy: .public)")
+            Ghostty.logger.warning("failed to insert surface during cross-window drop: \(error)")
             return
         }
 
