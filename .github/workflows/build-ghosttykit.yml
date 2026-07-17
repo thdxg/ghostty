@@ -1,0 +1,72 @@
+name: Build GhosttyKit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'pkg/**'
+      - 'vendor/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'build.zig.zon.json'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build xcframework
+        run: zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true
+
+      - name: Compress xcframework
+        run: |
+          cd macos
+          tar czf GhosttyKit.xcframework.tar.gz GhosttyKit.xcframework/
+
+      # Bundle the ghostty resources (themes + shell-integration under ghostty/,
+      # plus the compiled terminfo DB) so Macterm can ship them in its own app
+      # bundle and resolve TERM=xterm-ghostty, named themes, and shell
+      # integration without a separate Ghostty.app install. The build installs
+      # them to zig-out/share in the SAME layout a real Ghostty.app uses:
+      #   share/ghostty/{themes,shell-integration}   (-Demit-themes=true)
+      #   share/terminfo/78/xterm-ghostty            (compiled via tic, sibling)
+      # Tar zig-out/share verbatim so Macterm extracts it straight into
+      # Contents/Resources/, giving ghostty/ + a sibling terminfo/. libghostty
+      # derives TERMINFO as dirname(GHOSTTY_RESOURCES_DIR)/terminfo, so the
+      # terminfo dir MUST be a sibling of the ghostty/ resources dir — a flat
+      # layout breaks key input + TERM (macterm issues #39/#40). tar preserves
+      # the terminfo symlinks (xterm-ghostty aliases).
+      - name: Compress resources
+        run: |
+          tar czf ghostty-resources.tar.gz -C zig-out/share ghostty terminfo
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_DATE: ${{ github.run_id }}
+        run: |
+          TAG="build-$(date -u +%Y-%m-%d)"
+          COMMIT=$(git rev-parse --short HEAD)
+
+          if gh release view "$TAG" &> /dev/null; then
+            gh release delete "$TAG" --yes
+            git push --delete origin "$TAG" 2>/dev/null || true
+          fi
+
+          gh release create "$TAG" \
+            --title "GhosttyKit $(date -u +%Y-%m-%d)" \
+            --latest \
+            --notes "Built from commit ${COMMIT} on $(date -u +%Y-%m-%d)" \
+            macos/GhosttyKit.xcframework.tar.gz \
+            ghostty-resources.tar.gz
