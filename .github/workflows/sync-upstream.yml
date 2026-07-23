@@ -7,9 +7,9 @@ name: Sync Upstream
 #   1. Fork-owned FILES (DOWNSTREAM_FILES) — CI that upstream doesn't have.
 #      These are copied verbatim on top of upstream.
 #   2. Source PATCHES (.github/downstream/*.patch) — genuine libghostty
-#      changes that must be re-applied onto upstream every sync (currently just
-#      `command-wrapper`, the C-ABI hook Macterm's zmx session persistence
-#      needs). Applied with `git apply --3way`.
+#      changes that must be re-applied onto upstream every sync (currently
+#      `command-wrapper` for zmx session persistence and `output-activity` for
+#      embedder activity indicators). Applied with `git apply --3way`.
 #
 # Why not `git diff upstream..HEAD` like the old workflow: it captured the whole
 # tree difference (including any accidental drift) and re-applied it every run,
@@ -42,6 +42,7 @@ env:
     .github/workflows/sync-upstream.yml
     .github/workflows/assert-no-drift.yml
     .github/downstream/0001-command-wrapper.patch
+    .github/downstream/0002-output-activity.patch
 
 jobs:
   sync:
@@ -64,10 +65,12 @@ jobs:
           # the sync can never revert upstream source) into a temp dir.
           tmp="$(mktemp -d)"
           for f in $DOWNSTREAM_FILES; do
-            if [ -f "$f" ]; then
-              mkdir -p "$tmp/$(dirname "$f")"
-              cp "$f" "$tmp/$f"
+            if [ ! -f "$f" ]; then
+              echo "::error::Declared downstream file is missing: $f" >&2
+              exit 1
             fi
+            mkdir -p "$tmp/$(dirname "$f")"
+            cp "$f" "$tmp/$f"
           done
 
           # Rebuild main as pristine upstream HEAD…
