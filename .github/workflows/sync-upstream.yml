@@ -43,6 +43,7 @@ env:
     .github/workflows/assert-no-drift.yml
     .github/downstream/0001-command-wrapper.patch
     .github/downstream/0002-output-activity.patch
+    .github/downstream/0003-sync-environ.patch
 
 jobs:
   sync:
