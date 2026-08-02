@@ -26,8 +26,29 @@ jobs:
         with:
           version: 0.16.0
 
+      # -Dsentry=false: libghostty's Sentry crash reporter is built for the
+      # standalone Ghostty.app, and it is actively harmful to an embedder.
+      # Its init runs on a background thread ("sentry-init") that scans
+      # ghostty's cached `environ` slice for XDG_CACHE_HOME (src/crash/
+      # sentry.zig) CONCURRENTLY with host-app startup. Macterm mutates the
+      # environment during launch, and any realloc of `environ` leaves that
+      # slice dangling — the scan then dereferences a garbage pointer and
+      # SIGSEGVs. Reproduced deterministically on Sparkle update+relaunch
+      # (macterm 1.21.0, 1.22.0-beta.1, 1.22.0-beta.2), where AppKit drives
+      # window creation from an Apple Event and lands inside the scan window.
+      # Macterm's own EnvironmentSetup ordering fix can't close this: it makes
+      # all mutations precede ghostty_init, but this reader is concurrent, and
+      # libghostty exposes no C API to re-sync `environ` (ghostty's GTK runtime
+      # re-syncs internally via global.syncEnviron).
+      #
+      # Turning it off is also correct on the merits: Macterm ships no
+      # telemetry, never calls a Sentry API, and Sentry only writes reports to
+      # a local cache dir that nothing here collects. The option is a real
+      # upstream build flag (src/build/Config.zig), and src/crash/sentry.zig
+      # gates even the `@import("sentry")` on it, so the library is not linked
+      # at all rather than merely left dormant.
       - name: Build xcframework
-        run: zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true
+        run: zig build -Doptimize=ReleaseFast -Dsentry=false -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true
 
       - name: Compress xcframework
         run: |
