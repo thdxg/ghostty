@@ -655,6 +655,7 @@ pub fn init(
         // Initialize our IO backend
         var io_exec = try termio.Exec.init(alloc, .{
             .command = command,
+            .command_wrapper = config.@"command-wrapper",
             .env = env,
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
@@ -1100,6 +1101,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .renderer_health => |health| self.updateRendererHealth(health),
 
         .scrollbar => |scrollbar| self.updateScrollbar(scrollbar),
+
+        .output_activity => |scrollbar| self.updateOutputActivity(scrollbar),
 
         .present_surface => try self.presentSurface(),
 
@@ -1715,6 +1718,22 @@ fn updateScrollbar(self: *Surface, scrollbar: terminal.Scrollbar) void {
         scrollbar,
     ) catch |err| {
         log.warn("failed to notify app of scrollbar change err={}", .{err});
+    };
+}
+
+/// Called on each throttled output-activity heartbeat from the IO path.
+/// Unlike `.scrollbar` (a renderer-track signal that stops while the
+/// surface is occluded), this fires whenever the child produces output
+/// regardless of visibility, so embedders can drive an activity indicator
+/// for in-place TUI redraws and backgrounded surfaces. The payload carries
+/// the current scrollbar geometry.
+fn updateOutputActivity(self: *Surface, scrollbar: terminal.Scrollbar) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .output_activity,
+        scrollbar,
+    ) catch |err| {
+        log.warn("failed to notify app of output activity err={}", .{err});
     };
 }
 
