@@ -477,6 +477,9 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  const char* const* command_wrapper;
+  size_t command_wrapper_count;
+  bool disable_shell_integration;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -957,6 +960,7 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
+  GHOSTTY_ACTION_OUTPUT_ACTIVITY,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -971,6 +975,7 @@ typedef union {
   ghostty_action_initial_size_s initial_size;
   ghostty_action_cell_size_s cell_size;
   ghostty_action_scrollbar_s scrollbar;
+  ghostty_action_scrollbar_s output_activity;
   ghostty_action_inspector_e inspector;
   ghostty_action_export_terminal_io_s export_terminal_io;
   ghostty_action_desktop_notification_s desktop_notification;
@@ -1071,6 +1076,7 @@ typedef enum {
 // Published API
 
 GHOSTTY_API int ghostty_init(uintptr_t, char**);
+GHOSTTY_API void ghostty_sync_environ(void);
 GHOSTTY_API void ghostty_cli_try_action(void);
 GHOSTTY_API ghostty_info_s ghostty_info(void);
 GHOSTTY_API const char* ghostty_translate(const char*);
