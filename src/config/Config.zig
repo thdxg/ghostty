@@ -1022,6 +1022,24 @@ palette: Palette = .{},
 /// Available since: 1.2.0
 @"background-opacity-cells": bool = false,
 
+/// If `true`, the renderer never paints the default background color —
+/// only cells with an explicit background color set are painted. The
+/// terminal background is then whatever the host composites behind the
+/// surface.
+///
+/// This is intended for embedders that draw the window background
+/// themselves (their own tint, blur, or glass) and would otherwise
+/// double-tint against the surface's background paint. It is the same
+/// mechanism the macOS glass `background-blur` styles use to skip the
+/// default background, but independent of blur mode and platform.
+///
+/// `background-opacity` continues to apply to explicit cell backgrounds
+/// via `background-opacity-cells`, which behaves exactly as documented
+/// above.
+///
+/// Downstream (thdxg/ghostty) extension; not part of upstream Ghostty.
+@"background-default-transparent": bool = false,
+
 /// Whether to blur the background when `background-opacity` is less than 1.
 ///
 /// Valid values are:
