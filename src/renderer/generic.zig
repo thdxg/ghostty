@@ -559,6 +559,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background: terminal.color.RGB,
             background_opacity: f64,
             background_opacity_cells: bool,
+            background_default_transparent: bool,
             foreground: terminal.color.RGB,
             selection_background: ?configpkg.Config.TerminalColor,
             selection_foreground: ?configpkg.Config.TerminalColor,
@@ -620,6 +621,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return .{
                     .background_opacity = @max(0, @min(1, config.@"background-opacity")),
                     .background_opacity_cells = config.@"background-opacity-cells",
+                    .background_default_transparent = config.@"background-default-transparent",
                     .font_thicken = config.@"font-thicken",
                     .font_thicken_strength = config.@"font-thicken-strength",
                     .font_features = font_features.list,
@@ -1579,6 +1581,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     else => {},
                 };
+
+                // The embedder composites the default background itself —
+                // the same effect as the glass styles above, but independent
+                // of blur mode and platform. Explicit cell backgrounds are
+                // unaffected (they follow `background-opacity-cells`).
+                if (self.config.background_default_transparent) {
+                    self.uniforms.bg_color[3] = 0;
+                }
 
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
