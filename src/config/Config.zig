@@ -1022,6 +1022,24 @@ palette: Palette = .{},
 /// Available since: 1.2.0
 @"background-opacity-cells": bool = false,
 
+/// If `true`, the renderer never paints the default background color —
+/// only cells with an explicit background color set are painted. The
+/// terminal background is then whatever the host composites behind the
+/// surface.
+///
+/// This is intended for embedders that draw the window background
+/// themselves (their own tint, blur, or glass) and would otherwise
+/// double-tint against the surface's background paint. It is the same
+/// mechanism the macOS glass `background-blur` styles use to skip the
+/// default background, but independent of blur mode and platform.
+///
+/// `background-opacity` continues to apply to explicit cell backgrounds
+/// via `background-opacity-cells`, which behaves exactly as documented
+/// above.
+///
+/// Downstream (thdxg/ghostty) extension; not part of upstream Ghostty.
+@"background-default-transparent": bool = false,
+
 /// Whether to blur the background when `background-opacity` is less than 1.
 ///
 /// Valid values are:
@@ -1189,6 +1207,22 @@ command: ?Command = null,
 ///     name your binary appropriately or source the shell integration script
 ///     manually.
 @"initial-command": ?Command = null,
+
+/// A wrapper command that is prepended to the final command Ghostty would
+/// otherwise execute, after shell resolution, shell integration, and (on
+/// macOS) the `login(1)` wrapping have all been applied. The wrapper's
+/// arguments are placed before the resolved argv, so the resolved command
+/// runs as a child of the wrapper.
+///
+/// This exists so an embedder can run the shell under a supervisor such as a
+/// session-persistence multiplexer while keeping Ghostty's normal shell
+/// resolution and shell integration fully intact. Without this, an embedder
+/// would have to replace `command` with the wrapper, which loses the user's
+/// configured `command`, shell detection, and integration.
+///
+/// Specified like `command`, e.g. `direct:zmx attach my-session`. Use the
+/// `direct:` prefix to avoid a `/bin/sh -c` roundtrip for the wrapper.
+@"command-wrapper": ?Command = null,
 
 /// Controls when command finished notifications are sent. There are
 /// three options:
