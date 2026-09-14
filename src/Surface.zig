@@ -317,6 +317,7 @@ const DerivedConfig = struct {
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
     mouse_shift_capture: configpkg.MouseShiftCapture,
+    smooth_scroll: bool,
     fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
     macos_option_as_alt: ?input.OptionAsAlt,
@@ -397,6 +398,7 @@ const DerivedConfig = struct {
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
             .mouse_shift_capture = config.@"mouse-shift-capture",
+            .smooth_scroll = config.@"smooth-scroll",
             .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
             .macos_option_as_alt = config.@"macos-option-as-alt",
@@ -3652,10 +3654,14 @@ pub fn scrollCallback(
         // Smooth scrolling: publish the sub-row remainder of a precision
         // gesture so the renderer can draw the viewport between rows.
         // scrollViewport above reset the previous remainder; a discrete
-        // wheel never has one. Sign matches yoff: positive is content
+        // wheel never has one, and with the key off the remainder stays
+        // an accumulator detail. Sign matches yoff: positive is content
         // moving down. The renderer validates it against the screen.
         self.io.terminal.screens.active.viewport_pixel_offset =
-            if (scroll_mods.precision) self.mouse.pending_scroll_y else 0;
+            if (self.config.smooth_scroll and scroll_mods.precision)
+                self.mouse.pending_scroll_y
+            else
+                0;
     }
 
     try self.queueRender();

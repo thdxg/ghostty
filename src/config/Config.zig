@@ -1001,6 +1001,21 @@ palette: Palette = .{},
 /// The default value is "3" for discrete devices and "1" for precision devices.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
+/// Draw the viewport between rows while scrolling with a precision device
+/// (trackpad, Magic Mouse), so scrollback moves by pixels rather than jumping
+/// a row at a time. Precision scrolling is already accumulated in pixels;
+/// this keeps the sub-row remainder and renders it, which is what makes
+/// the motion continuous, momentum included.
+///
+/// Only the scrollback viewport scrolls this way. Programs that draw their
+/// own screen (the alternate screen: editors, pagers) repaint by rows, and
+/// mouse reporting turns the wheel into button events, so neither is
+/// affected. Discrete wheels always scroll by whole rows.
+///
+/// Downstream (thdxg/ghostty) key, read by Macterm's Experimental settings.
+/// This can be changed at runtime.
+@"smooth-scroll": bool = false,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
