@@ -206,6 +206,12 @@ pub const Uniforms = extern struct {
     /// top, right, bottom, left.
     grid_padding: [4]f32 align(16),
 
+    /// Smooth scrolling. `.x` is the sub-row viewport offset in pixels
+    /// (positive: content drawn shifted down); `.y` is how many grid
+    /// rows sit above the terminal viewport (0 or 1). Grid row `y` is
+    /// drawn at `(y - scroll_offset.y) * cell_size.y + scroll_offset.x`.
+    scroll_offset: [2]f32 align(8),
+
     /// Bit mask defining which directions to
     /// extend cell colors in to the padding.
     /// Order, LSB first: left, right, up, down

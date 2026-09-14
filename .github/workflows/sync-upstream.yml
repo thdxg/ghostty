@@ -45,6 +45,7 @@ env:
     .github/downstream/0002-output-activity.patch
     .github/downstream/0003-sync-environ.patch
     .github/downstream/0004-background-default-transparent.patch
+    .github/downstream/0005-smooth-scroll.patch
 
 jobs:
   sync:

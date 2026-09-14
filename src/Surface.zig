@@ -3530,14 +3530,18 @@ pub fn scrollCallback(
             break :y .{};
         }
 
-        // We scroll by the number of rows in the offset and save the remainder
+        // We scroll by the number of whole rows in the offset and save the
+        // remainder. The remainder must be computed from the truncated row
+        // count: `poff - (poff / cell_size) * cell_size` is identically
+        // zero, which threw the sub-row part away on every commit and made
+        // smooth scrolling snap back by that much each time a row landed.
         const amount = poff / cell_size;
         assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
 
         // Round towards zero.
         const delta: isize = @intFromFloat(@trunc(amount));
         assert(@abs(delta) >= 1);
+        self.mouse.pending_scroll_y = poff - (@as(f64, @floatFromInt(delta)) * cell_size);
 
         break :y .{ .delta = delta };
     };
@@ -3644,6 +3648,14 @@ pub fn scrollCallback(
             // is negative down but our viewport is positive down.
             self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
         }
+
+        // Smooth scrolling: publish the sub-row remainder of a precision
+        // gesture so the renderer can draw the viewport between rows.
+        // scrollViewport above reset the previous remainder; a discrete
+        // wheel never has one. Sign matches yoff: positive is content
+        // moving down. The renderer validates it against the screen.
+        self.io.terminal.screens.active.viewport_pixel_offset =
+            if (scroll_mods.precision) self.mouse.pending_scroll_y else 0;
     }
 
     try self.queueRender();
@@ -4761,8 +4773,12 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+    // Smooth scrolling draws the viewport shifted by a sub-row offset;
+    // undo it so the hit-tested cell is the one under the pointer.
+    const offset: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
+
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos - offset } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
 }
