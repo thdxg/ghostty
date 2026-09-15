@@ -1,0 +1,650 @@
+diff --git a/src/Surface.zig b/src/Surface.zig
+index a49ceb609..6c0f436c8 100644
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -317,6 +317,7 @@ const DerivedConfig = struct {
+     mouse_reporting: bool,
+     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
+     mouse_shift_capture: configpkg.MouseShiftCapture,
++    smooth_scroll: bool,
+     fullscreen: configpkg.Fullscreen,
+     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
+     macos_option_as_alt: ?input.OptionAsAlt,
+@@ -397,6 +398,7 @@ const DerivedConfig = struct {
+             .mouse_reporting = config.@"mouse-reporting",
+             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
+             .mouse_shift_capture = config.@"mouse-shift-capture",
++            .smooth_scroll = config.@"smooth-scroll",
+             .fullscreen = config.fullscreen,
+             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
+             .macos_option_as_alt = config.@"macos-option-as-alt",
+@@ -3530,14 +3532,18 @@ pub fn scrollCallback(
+             break :y .{};
+         }
+ 
+-        // We scroll by the number of rows in the offset and save the remainder
++        // We scroll by the number of whole rows in the offset and save the
++        // remainder. The remainder must be computed from the truncated row
++        // count: `poff - (poff / cell_size) * cell_size` is identically
++        // zero, which threw the sub-row part away on every commit and made
++        // smooth scrolling snap back by that much each time a row landed.
+         const amount = poff / cell_size;
+         assert(@abs(amount) >= 1);
+-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
+ 
+         // Round towards zero.
+         const delta: isize = @intFromFloat(@trunc(amount));
+         assert(@abs(delta) >= 1);
++        self.mouse.pending_scroll_y = poff - (@as(f64, @floatFromInt(delta)) * cell_size);
+ 
+         break :y .{ .delta = delta };
+     };
+@@ -3644,6 +3650,18 @@ pub fn scrollCallback(
+             // is negative down but our viewport is positive down.
+             self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
+         }
++
++        // Smooth scrolling: publish the sub-row remainder of a precision
++        // gesture so the renderer can draw the viewport between rows.
++        // scrollViewport above reset the previous remainder; a discrete
++        // wheel never has one, and with the key off the remainder stays
++        // an accumulator detail. Sign matches yoff: positive is content
++        // moving down. The renderer validates it against the screen.
++        self.io.terminal.screens.active.viewport_pixel_offset =
++            if (self.config.smooth_scroll and scroll_mods.precision)
++                self.mouse.pending_scroll_y
++            else
++                0;
+     }
+ 
+     try self.queueRender();
+@@ -4761,8 +4779,12 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+ }
+ 
+ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
++    // Smooth scrolling draws the viewport shifted by a sub-row offset;
++    // undo it so the hit-tested cell is the one under the pointer.
++    const offset: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
++
+     // Get our grid cell
+-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
++    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos - offset } };
+     const grid = coord.convert(.grid, self.size).grid;
+     return .{ .x = grid.x, .y = grid.y };
+ }
+diff --git a/src/config/Config.zig b/src/config/Config.zig
+index 6038a2712..ac7af7968 100644
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -1001,6 +1001,21 @@ palette: Palette = .{},
+ /// The default value is "3" for discrete devices and "1" for precision devices.
+ @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
+ 
++/// Draw the viewport between rows while scrolling with a precision device
++/// (trackpad, Magic Mouse), so scrollback moves by pixels rather than jumping
++/// a row at a time. Precision scrolling is already accumulated in pixels;
++/// this keeps the sub-row remainder and renders it, which is what makes
++/// the motion continuous, momentum included.
++///
++/// Only the scrollback viewport scrolls this way. Programs that draw their
++/// own screen (the alternate screen: editors, pagers) repaint by rows, and
++/// mouse reporting turns the wheel into button events, so neither is
++/// affected. Discrete wheels always scroll by whole rows.
++///
++/// Downstream (thdxg/ghostty) key, read by Macterm's Experimental settings.
++/// This can be changed at runtime.
++@"smooth-scroll": bool = false,
++
+ /// The opacity level (opposite of transparency) of the background. A value of
+ /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
+ /// or greater than 1 will be clamped to the nearest valid value.
+diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
+index 03b39473b..e1e4bc487 100644
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -724,6 +724,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                 // Render state
+                 .cells = .{},
+                 .uniforms = .{
++                    .scroll_offset = .{ 0, 0 },
+                     .projection_matrix = undefined,
+                     .cell_size = undefined,
+                     .grid_size = undefined,
+@@ -2388,10 +2389,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                     cursor.grid_pos[0] * cell.width + padding.left,
+                 );
+                 // Top edge, relative to the top of the
+-                // screen, of the cell the cursor is in.
++                // screen, of the cell the cursor is in. Grid rows are
++                // drawn shifted while smooth scrolling (see the
++                // scroll_offset uniform), so shift the cursor with them.
+                 var pixel_y: f32 = @floatFromInt(
+                     cursor.grid_pos[1] * cell.height + padding.top,
+                 );
++                pixel_y += self.uniforms.scroll_offset[0] -
++                    self.uniforms.scroll_offset[1] * @as(f32, @floatFromInt(cell.height));
+ 
+                 // If +Y is up in our shaders, we need to flip the coordinate
+                 // so that it's instead the top edge of the cell relative to
+@@ -2559,6 +2564,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
+             }
+ 
++            // Smooth scrolling: where the grid sits relative to the
++            // viewport this frame. A change here is a visible change even
++            // when no cell is dirty (the same rows, drawn a few pixels
++            // over), so it must count as a rebuild or drawFrame would
++            // present the previous frame.
++            const scroll_offset: [2]f32 = .{
++                @floatCast(state.viewport_pixel_offset),
++                @floatFromInt(state.rows_above),
++            };
++            if (!std.meta.eql(scroll_offset, self.uniforms.scroll_offset)) {
++                self.uniforms.scroll_offset = scroll_offset;
++                self.cells_rebuilt = true;
++            }
++
+             const rebuild = state.dirty == .full or grid_size_diff;
+             if (rebuild) {
+                 // If we are doing a full rebuild, then we clear the entire cell buffer.
+diff --git a/src/renderer/metal/shaders.zig b/src/renderer/metal/shaders.zig
+index 6ae321068..e9ed10ec6 100644
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -206,6 +206,12 @@ pub const Uniforms = extern struct {
+     /// top, right, bottom, left.
+     grid_padding: [4]f32 align(16),
+ 
++    /// Smooth scrolling. `.x` is the sub-row viewport offset in pixels
++    /// (positive: content drawn shifted down); `.y` is how many grid
++    /// rows sit above the terminal viewport (0 or 1). Grid row `y` is
++    /// drawn at `(y - scroll_offset.y) * cell_size.y + scroll_offset.x`.
++    scroll_offset: [2]f32 align(8),
++
+     /// Bit mask defining which directions to
+     /// extend cell colors in to the padding.
+     /// Order, LSB first: left, right, up, down
+diff --git a/src/renderer/opengl/shaders.zig b/src/renderer/opengl/shaders.zig
+index 68d2babf6..36514aca6 100644
+--- a/src/renderer/opengl/shaders.zig
++++ b/src/renderer/opengl/shaders.zig
+@@ -172,6 +172,12 @@ pub const Uniforms = extern struct {
+     /// top, right, bottom, left.
+     grid_padding: [4]f32 align(16),
+ 
++    /// Smooth scrolling. `.x` is the sub-row viewport offset in pixels
++    /// (positive: content drawn shifted down); `.y` is how many grid
++    /// rows sit above the terminal viewport (0 or 1). Grid row `y` is
++    /// drawn at `(y - scroll_offset.y) * cell_size.y + scroll_offset.x`.
++    scroll_offset: [2]f32 align(8),
++
+     /// Bit mask defining which directions to
+     /// extend cell colors in to the padding.
+     /// Order, LSB first: left, right, up, down
+diff --git a/src/renderer/shaders/glsl/cell_bg.f.glsl b/src/renderer/shaders/glsl/cell_bg.f.glsl
+index fa48c6736..e1efad71d 100644
+--- a/src/renderer/shaders/glsl/cell_bg.f.glsl
++++ b/src/renderer/shaders/glsl/cell_bg.f.glsl
+@@ -12,41 +12,55 @@ layout(binding = 1, std430) readonly buffer bg_cells {
+ 
+ vec4 cell_bg() {
+     uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
+-    ivec2 grid_pos = ivec2(floor((gl_FragCoord.xy - grid_padding.wx) / cell_size));
+     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
+ 
++    // Position relative to the visible grid. Its extent comes from the
++    // grid itself, not from grid_padding's bottom/right, which hold the
++    // leftover measured at the last resize and can be stale. While smooth
++    // scrolling the grid carries one row more than is visible. Padding
++    // decisions use this unshifted position; the cell lookup below then
++    // applies the shift, so a partially revealed row never leaks into
++    // the padding.
++    vec2 rel = gl_FragCoord.xy - grid_padding.wx;
++    float extra_rows = scroll_offset.x != 0.0 ? 1.0 : 0.0;
++    vec2 visible = cell_size * vec2(float(grid_size.x), float(grid_size.y) - extra_rows);
++
+     vec4 bg = vec4(0.0);
+ 
+     // Clamp x position, extends edge bg colors in to padding on sides.
+-    if (grid_pos.x < 0) {
++    if (rel.x < 0.0) {
+         if ((padding_extend & EXTEND_LEFT) != 0) {
+-            grid_pos.x = 0;
++            rel.x = 0.0;
+         } else {
+             return bg;
+         }
+-    } else if (grid_pos.x > grid_size.x - 1) {
++    } else if (rel.x >= visible.x) {
+         if ((padding_extend & EXTEND_RIGHT) != 0) {
+-            grid_pos.x = int(grid_size.x) - 1;
++            rel.x = visible.x - 0.5;
+         } else {
+             return bg;
+         }
+     }
+ 
+     // Clamp y position if we should extend, otherwise discard if out of bounds.
+-    if (grid_pos.y < 0) {
++    if (rel.y < 0.0) {
+         if ((padding_extend & EXTEND_UP) != 0) {
+-            grid_pos.y = 0;
++            rel.y = 0.0;
+         } else {
+             return bg;
+         }
+-    } else if (grid_pos.y > grid_size.y - 1) {
++    } else if (rel.y >= visible.y) {
+         if ((padding_extend & EXTEND_DOWN) != 0) {
+-            grid_pos.y = int(grid_size.y) - 1;
++            rel.y = visible.y - 0.5;
+         } else {
+             return bg;
+         }
+     }
+ 
++    float shift_y = scroll_offset.x - scroll_offset.y * cell_size.y;
++    ivec2 grid_pos = ivec2(floor((rel - vec2(0.0, shift_y)) / cell_size));
++    grid_pos = clamp(grid_pos, ivec2(0), ivec2(grid_size) - 1);
++
+     // Load the color for the cell.
+     vec4 cell_color = load_color(
+             unpack4u8(cells[grid_pos.y * grid_size.x + grid_pos.x]),
+diff --git a/src/renderer/shaders/glsl/cell_text.f.glsl b/src/renderer/shaders/glsl/cell_text.f.glsl
+index 176efcbde..d234f5077 100644
+--- a/src/renderer/shaders/glsl/cell_text.f.glsl
++++ b/src/renderer/shaders/glsl/cell_text.f.glsl
+@@ -17,7 +17,20 @@ const uint ATLAS_COLOR = 1u;
+ // Must declare this output for some versions of OpenGL.
+ layout(location = 0) out vec4 out_FragColor;
+ 
++// Position the origin to the upper left
++layout(origin_upper_left) in vec4 gl_FragCoord;
++
+ void main() {
++    // Smooth scrolling: a partially revealed row extends into the padding;
++    // clip it to the visible grid. Only while shifted, so glyphs that
++    // legitimately overhang a cell edge are untouched at rest.
++    if (scroll_offset.x != 0.0) {
++        float y = gl_FragCoord.y - grid_padding.x;
++        uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
++        float visible_h = (float(grid_size.y) - 1.0) * cell_size.y;
++        if (y < 0.0 || y >= visible_h) discard;
++    }
++
+     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
+     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
+ 
+diff --git a/src/renderer/shaders/glsl/cell_text.v.glsl b/src/renderer/shaders/glsl/cell_text.v.glsl
+index 7e38e2f0c..42c94a29f 100644
+--- a/src/renderer/shaders/glsl/cell_text.v.glsl
++++ b/src/renderer/shaders/glsl/cell_text.v.glsl
+@@ -49,6 +49,10 @@ void main() {
+     // Convert the grid x, y into world space x, y by accounting for cell size
+     vec2 cell_pos = cell_size * vec2(grid_pos);
+ 
++    // Smooth scrolling: grid rows are shifted by the sub-row offset, with
++    // an extra row above the viewport drawn at negative y.
++    cell_pos.y += scroll_offset.x - scroll_offset.y * cell_size.y;
++
+     int vid = gl_VertexID;
+ 
+     // We use a triangle strip with 4 vertices to render quads,
+diff --git a/src/renderer/shaders/glsl/common.glsl b/src/renderer/shaders/glsl/common.glsl
+index 1a7ea03a7..c70ccce2c 100644
+--- a/src/renderer/shaders/glsl/common.glsl
++++ b/src/renderer/shaders/glsl/common.glsl
+@@ -17,6 +17,10 @@ layout(binding = 1, std140) uniform Globals {
+     uniform vec2 cell_size;
+     uniform uint grid_size_packed_2u16;
+     uniform vec4 grid_padding;
++    // Smooth scrolling: .x = sub-row viewport offset in pixels (positive:
++    // content shifted down), .y = grid rows above the viewport (0 or 1).
++    // Grid row y is drawn at (y - .y) * cell_size.y + .x.
++    uniform vec2 scroll_offset;
+     uniform uint padding_extend;
+     uniform float min_contrast;
+     uniform uint cursor_pos_packed_2u16;
+diff --git a/src/renderer/shaders/glsl/image.v.glsl b/src/renderer/shaders/glsl/image.v.glsl
+index 779fae32f..e2e83885b 100644
+--- a/src/renderer/shaders/glsl/image.v.glsl
++++ b/src/renderer/shaders/glsl/image.v.glsl
+@@ -43,5 +43,9 @@ void main() {
+     vec2 image_pos = (cell_size * grid_pos) + cell_offset;
+     image_pos += dest_size * corner;
+ 
++    // Smooth scrolling: image placements are in terminal viewport rows,
++    // so they move by the sub-row offset alone.
++    image_pos.y += scroll_offset.x;
++
+     gl_Position = projection_matrix * vec4(image_pos.xy, 1.0, 1.0);
+ }
+diff --git a/src/renderer/shaders/shaders.metal b/src/renderer/shaders/shaders.metal
+index 4e02b6336..ec5e1f259 100644
+--- a/src/renderer/shaders/shaders.metal
++++ b/src/renderer/shaders/shaders.metal
+@@ -15,6 +15,10 @@ struct Uniforms {
+   float2 cell_size;
+   ushort2 grid_size;
+   float4 grid_padding;
++  // Smooth scrolling: .x = sub-row viewport offset in pixels (positive:
++  // content shifted down), .y = grid rows above the viewport (0 or 1).
++  // Grid row y is drawn at (y - .y) * cell_size.y + .x.
++  float2 scroll_offset;
+   uint8_t padding_extend;
+   float min_contrast;
+   ushort2 cursor_pos;
+@@ -453,40 +457,55 @@ fragment float4 cell_bg_fragment(
+   constant Uniforms& uniforms [[buffer(1)]],
+   constant uchar4 *cells [[buffer(2)]]
+ ) {
+-  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
++  // Position relative to the visible grid. Its extent comes from the
++  // grid itself, not from grid_padding's bottom/right, which hold the
++  // leftover measured at the last resize and can be stale. While smooth
++  // scrolling the grid carries one row more than is visible. Padding
++  // decisions use this unshifted position; the cell lookup below then
++  // applies the shift, so a partially revealed row never leaks into
++  // the padding.
++  float2 rel = in.position.xy - uniforms.grid_padding.wx;
++  float extra_rows = uniforms.scroll_offset.x != 0.0 ? 1.0 : 0.0;
++  float2 visible = uniforms.cell_size *
++      float2(uniforms.grid_size.x, float(uniforms.grid_size.y) - extra_rows);
+ 
+   float4 bg = float4(0.0);
+ 
+   // Clamp x position, extends edge bg colors in to padding on sides.
+-  if (grid_pos.x < 0) {
++  if (rel.x < 0.0) {
+     if (uniforms.padding_extend & EXTEND_LEFT) {
+-      grid_pos.x = 0;
++      rel.x = 0.0;
+     } else {
+       return bg;
+     }
+-  } else if (grid_pos.x > uniforms.grid_size.x - 1) {
++  } else if (rel.x >= visible.x) {
+     if (uniforms.padding_extend & EXTEND_RIGHT) {
+-      grid_pos.x = uniforms.grid_size.x - 1;
++      rel.x = visible.x - 0.5;
+     } else {
+       return bg;
+     }
+   }
+ 
+   // Clamp y position if we should extend, otherwise discard if out of bounds.
+-  if (grid_pos.y < 0) {
++  if (rel.y < 0.0) {
+     if (uniforms.padding_extend & EXTEND_UP) {
+-      grid_pos.y = 0;
++      rel.y = 0.0;
+     } else {
+       return bg;
+     }
+-  } else if (grid_pos.y > uniforms.grid_size.y - 1) {
++  } else if (rel.y >= visible.y) {
+     if (uniforms.padding_extend & EXTEND_DOWN) {
+-      grid_pos.y = uniforms.grid_size.y - 1;
++      rel.y = visible.y - 0.5;
+     } else {
+       return bg;
+     }
+   }
+ 
++  float shift_y = uniforms.scroll_offset.x -
++      uniforms.scroll_offset.y * uniforms.cell_size.y;
++  int2 grid_pos = int2(floor((rel - float2(0.0, shift_y)) / uniforms.cell_size));
++  grid_pos = clamp(grid_pos, int2(0), int2(uniforms.grid_size) - 1);
++
+   // Load the color for the cell.
+   uchar4 cell_color = cells[grid_pos.y * uniforms.grid_size.x + grid_pos.x];
+ 
+@@ -562,6 +581,11 @@ vertex CellTextVertexOut cell_text_vertex(
+   // Convert the grid x, y into world space x, y by accounting for cell size
+   float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
+ 
++  // Smooth scrolling: grid rows are shifted by the sub-row offset, with
++  // an extra row above the viewport drawn at negative y.
++  cell_pos.y += uniforms.scroll_offset.x -
++      uniforms.scroll_offset.y * uniforms.cell_size.y;
++
+   // We use a triangle strip with 4 vertices to render quads,
+   // so we determine which corner of the cell this vertex is in
+   // based on the vertex ID.
+@@ -687,6 +711,15 @@ fragment float4 cell_text_fragment(
+     filter::nearest
+   );
+ 
++  // Smooth scrolling: a partially revealed row extends into the padding;
++  // clip it to the visible grid. Only while shifted, so glyphs that
++  // legitimately overhang a cell edge are untouched at rest.
++  if (uniforms.scroll_offset.x != 0.0) {
++    float y = in.position.y - uniforms.grid_padding.x;
++    float visible_h = (float(uniforms.grid_size.y) - 1.0) * uniforms.cell_size.y;
++    if (y < 0.0 || y >= visible_h) discard_fragment();
++  }
++
+   switch (in.atlas) {
+     default:
+     case ATLAS_GRAYSCALE: {
+@@ -823,6 +856,10 @@ vertex ImageVertexOut image_vertex(
+   float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
+   image_pos += in.dest_size * corner;
+ 
++  // Smooth scrolling: image placements are in terminal viewport rows,
++  // so they move by the sub-row offset alone.
++  image_pos.y += uniforms.scroll_offset.x;
++
+   out.position =
+       uniforms.projection_matrix * float4(image_pos.x, image_pos.y, 0.0f, 1.0f);
+   out.tex_coord = tex_coord;
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index 208e276a2..8815bf91c 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -61,6 +61,16 @@ saved_cursor: ?SavedCursor = null,
+ /// automatically setup tracking.
+ selection: ?Selection = null,
+ 
++/// Sub-row offset of the viewport in pixels, for smooth (pixel-precise)
++/// scrolling. Positive means the viewport sits that many pixels *above*
++/// its row-aligned position (content is drawn shifted down, revealing the
++/// bottom of the row above); negative means below. Always within one cell
++/// height. Any row-level viewport move resets it: the offset only ever
++/// describes the remainder of the scroll gesture that produced the current
++/// viewport, never a stale one. Rendering validates it against the screen
++/// (an offset pointing at a row that doesn't exist is drawn as zero).
++viewport_pixel_offset: f64 = 0,
++
+ /// The charset state
+ charset: CharsetState = .{},
+ 
+@@ -1626,6 +1636,10 @@ pub const Scroll = union(enum) {
+ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
+     defer self.assertIntegrity();
+ 
++    // A row-level move invalidates any sub-row remainder; the scroll
++    // callback re-publishes its own remainder after the move.
++    self.viewport_pixel_offset = 0;
++
+     if (comptime build_options.kitty_graphics) {
+         // No matter what, scrolling marks our image state as dirty since
+         // it could move placements. If there are no placements or no images
+diff --git a/src/terminal/render.zig b/src/terminal/render.zig
+index 6bcddb2c2..625075684 100644
+--- a/src/terminal/render.zig
++++ b/src/terminal/render.zig
+@@ -110,6 +110,17 @@ pub const RenderState = struct {
+     /// values for comparison.
+     viewport_pin: ?PageList.Pin = null,
+ 
++    /// Smooth scrolling: the validated sub-row viewport offset in pixels
++    /// (see Screen.viewport_pixel_offset) and how many of `rows` sit
++    /// *above* the terminal's viewport. While the offset is non-zero the
++    /// state holds one row more than the viewport — the row being revealed
++    /// at the top (`rows_above == 1`) or at the bottom (`rows_above == 0`,
++    /// extra row last). Renderers draw row `y` at
++    /// `(y - rows_above) * cell_height + viewport_pixel_offset`.
++    /// Both are zero when the offset can't be honored (no such row).
++    viewport_pixel_offset: f64 = 0,
++    rows_above: size.CellCountInt = 0,
++
+     /// The cached selection so we can avoid expensive selection calculations
+     /// if possible.
+     selection_cache: ?SelectionCache = null,
+@@ -376,7 +387,28 @@ pub const RenderState = struct {
+         t: *Terminal,
+     ) Allocator.Error!void {
+         const s: *Screen = t.screens.active;
+-        const viewport_pin = s.pages.getTopLeft(.viewport);
++
++        // Smooth scrolling: honor a sub-row offset only if the row it
++        // reveals exists, and widen our row range to include that row.
++        const base_pin = s.pages.getTopLeft(.viewport);
++        var viewport_pin = base_pin;
++        var rows: size.CellCountInt = s.pages.rows;
++        var rows_above: size.CellCountInt = 0;
++        var pixel_offset: f64 = s.viewport_pixel_offset;
++        if (pixel_offset > 0) {
++            if (base_pin.up(1)) |above| {
++                viewport_pin = above;
++                rows += 1;
++                rows_above = 1;
++            } else pixel_offset = 0;
++        } else if (pixel_offset < 0) {
++            const below = if (s.pages.getBottomRight(.viewport)) |br|
++                br.down(1)
++            else
++                null;
++            if (below != null) rows += 1 else pixel_offset = 0;
++        }
++
+         const redraw = redraw: {
+             // If our screen key changed, we need to do a full rebuild
+             // because our render state is viewport-specific.
+@@ -398,9 +430,11 @@ pub const RenderState = struct {
+                 if (v > 0) break :redraw true;
+             }
+ 
+-            // If our dimensions changed, we do a full rebuild.
+-            if (self.rows != s.pages.rows or
+-                self.cols != s.pages.cols)
++            // If our dimensions changed, we do a full rebuild. This
++            // includes the extra smooth-scroll row coming or going.
++            if (self.rows != rows or
++                self.cols != s.pages.cols or
++                self.rows_above != rows_above)
+             {
+                 break :redraw true;
+             }
+@@ -414,9 +448,11 @@ pub const RenderState = struct {
+         };
+ 
+         // Always set our cheap fields, its more expensive to compare
+-        self.rows = s.pages.rows;
++        self.rows = rows;
+         self.cols = s.pages.cols;
+         self.viewport_pin = viewport_pin;
++        self.viewport_pixel_offset = pixel_offset;
++        self.rows_above = rows_above;
+         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
+         self.cursor.cell = s.cursor.page_cell.*;
+         self.cursor.style = s.cursor.style;
+@@ -1041,12 +1077,14 @@ pub const RenderState = struct {
+ 
+         // Our viewport point is sent in by the caller and can't be trusted.
+         // If it is outside the valid area then just return empty because
+-        // we can't possibly have a link there.
++        // we can't possibly have a link there. The point is in terminal
++        // viewport rows; ours may start one row above (smooth scrolling).
++        const link_y: usize = @as(usize, viewport_point.y) + self.rows_above;
+         if (viewport_point.x >= self.cols or
+-            viewport_point.y >= row_pins.len) return result;
++            link_y >= row_pins.len) return result;
+ 
+         // Grab our link ID
+-        const link_pin: PageList.Pin = row_pins[viewport_point.y];
++        const link_pin: PageList.Pin = row_pins[link_y];
+         const link_page: *page.Page = link_pin.node.page();
+         const link = link: {
+             const rac = link_page.getRowAndCell(
+@@ -2395,3 +2433,79 @@ test "dirty row resets highlights" {
+         try testing.expectEqual(0, row_highlights[0].items.len);
+     }
+ }
++
++test "RenderState smooth scroll offset adds the revealed row" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++
++    var t = try Terminal.init(io, alloc, .{
++        .cols = 10,
++        .rows = 3,
++    });
++    defer t.deinit(alloc);
++
++    // Five lines: "1" and "2" end up in scrollback, "3".."5" are active.
++    var s = t.vtStream();
++    defer s.deinit();
++    s.nextSlice("1\r\n2\r\n3\r\n4\r\n5");
++
++    var state: RenderState = .empty;
++    defer state.deinit(alloc);
++    try state.update(alloc, &t);
++    try testing.expectEqual(3, state.rows);
++    try testing.expectEqual(0, state.rows_above);
++    try testing.expectEqual(0, state.viewport_pixel_offset);
++
++    // A fraction of a row up: the row above the viewport is included
++    // first and everything else shifts down one grid row.
++    t.screens.active.viewport_pixel_offset = 4;
++    try state.update(alloc, &t);
++    try testing.expectEqual(4, state.viewport_pixel_offset);
++    try testing.expectEqual(1, state.rows_above);
++    try testing.expectEqual(4, state.rows);
++    try testing.expectEqual(4, state.row_data.len);
++    {
++        const cells = state.row_data.slice().items(.cells);
++        try testing.expectEqual('2', cells[0].get(0).raw.codepoint());
++        try testing.expectEqual('3', cells[1].get(0).raw.codepoint());
++        try testing.expectEqual('5', cells[3].get(0).raw.codepoint());
++    }
++    try testing.expectEqual(3, state.cursor.viewport.?.y);
++
++    // At the bottom nothing lies below, so a fraction down is dropped.
++    t.screens.active.viewport_pixel_offset = -4;
++    try state.update(alloc, &t);
++    try testing.expectEqual(0, state.viewport_pixel_offset);
++    try testing.expectEqual(0, state.rows_above);
++    try testing.expectEqual(3, state.rows);
++    try testing.expectEqual(2, state.cursor.viewport.?.y);
++
++    // A row-level viewport move clears any remainder.
++    t.screens.active.viewport_pixel_offset = 4;
++    t.scrollViewport(.{ .delta = -1 });
++    try testing.expectEqual(0, t.screens.active.viewport_pixel_offset);
++
++    // Scrolled up one row, a fraction down reveals the row below, last.
++    t.screens.active.viewport_pixel_offset = -4;
++    try state.update(alloc, &t);
++    try testing.expectEqual(-4, state.viewport_pixel_offset);
++    try testing.expectEqual(0, state.rows_above);
++    try testing.expectEqual(4, state.rows);
++    {
++        const cells = state.row_data.slice().items(.cells);
++        try testing.expectEqual('2', cells[0].get(0).raw.codepoint());
++        try testing.expectEqual('5', cells[3].get(0).raw.codepoint());
++    }
++
++    // At the top of scrollback nothing lies above.
++    t.scrollViewport(.top);
++    t.screens.active.viewport_pixel_offset = 4;
++    try state.update(alloc, &t);
++    try testing.expectEqual(0, state.viewport_pixel_offset);
++    try testing.expectEqual(3, state.rows);
++    {
++        const cells = state.row_data.slice().items(.cells);
++        try testing.expectEqual('1', cells[0].get(0).raw.codepoint());
++    }
++}

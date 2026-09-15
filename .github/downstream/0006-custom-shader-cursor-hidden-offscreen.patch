@@ -1,0 +1,38 @@
+diff --git a/src/config/Config.zig b/src/config/Config.zig
+index ac7af7968..ed2f4ffdd 100644
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -3171,7 +3171,13 @@ keybind: Keybinds = .{},
+ ///
+ ///  * `vec4 iPreviousCursorStyle` - Style of the previous terminal cursor
+ ///
+-///  * `vec4 iCursorVisible` - Visibility of the terminal cursor.
++///  * `int iCursorVisible` - Visibility of the terminal cursor.
++///
++///    0 when the cursor is hidden by the running program, and also while it
++///    is scrolled out of the viewport or in the off phase of a blink — the
++///    frames in which no cursor is drawn. The position uniforms keep their
++///    last value in those frames, so a shader that draws the cursor itself
++///    must check this rather than trust `iCurrentCursor`.
+ ///
+ ///  * `float iTimeCursorChange` - Timestamp of terminal cursor change.
+ ///
+diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
+index e1e4bc487..bfe2304e8 100644
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -2452,6 +2452,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                     uniforms.current_cursor_color = cursor_color;
+                     uniforms.cursor_change_time = uniforms.time;
+                 }
++            } else {
++                // No cursor glyph this frame: the cursor is scrolled out of
++                // the viewport, or in the off phase of a blink. The position
++                // uniforms above keep their last value, so a shader that
++                // draws the cursor itself (cursor-opacity = 0) would leave a
++                // phantom at the stale cell. Report it hidden, which is what
++                // the terminal is showing.
++                uniforms.cursor_visible = 0;
+             }
+ 
+             // Update focus uniforms
