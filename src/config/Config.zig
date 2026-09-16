@@ -1001,6 +1001,21 @@ palette: Palette = .{},
 /// The default value is "3" for discrete devices and "1" for precision devices.
 @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
 
+/// Draw the viewport between rows while scrolling with a precision device
+/// (trackpad, Magic Mouse), so scrollback moves by pixels rather than jumping
+/// a row at a time. Precision scrolling is already accumulated in pixels;
+/// this keeps the sub-row remainder and renders it, which is what makes
+/// the motion continuous, momentum included.
+///
+/// Only the scrollback viewport scrolls this way. Programs that draw their
+/// own screen (the alternate screen: editors, pagers) repaint by rows, and
+/// mouse reporting turns the wheel into button events, so neither is
+/// affected. Discrete wheels always scroll by whole rows.
+///
+/// Downstream (thdxg/ghostty) key, read by Macterm's Experimental settings.
+/// This can be changed at runtime.
+@"smooth-scroll": bool = false,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -1027,6 +1042,24 @@ palette: Palette = .{},
 ///
 /// Available since: 1.2.0
 @"background-opacity-cells": bool = false,
+
+/// If `true`, the renderer never paints the default background color —
+/// only cells with an explicit background color set are painted. The
+/// terminal background is then whatever the host composites behind the
+/// surface.
+///
+/// This is intended for embedders that draw the window background
+/// themselves (their own tint, blur, or glass) and would otherwise
+/// double-tint against the surface's background paint. It is the same
+/// mechanism the macOS glass `background-blur` styles use to skip the
+/// default background, but independent of blur mode and platform.
+///
+/// `background-opacity` continues to apply to explicit cell backgrounds
+/// via `background-opacity-cells`, which behaves exactly as documented
+/// above.
+///
+/// Downstream (thdxg/ghostty) extension; not part of upstream Ghostty.
+@"background-default-transparent": bool = false,
 
 /// Whether to blur the background when `background-opacity` is less than 1.
 ///
@@ -1195,6 +1228,22 @@ command: ?Command = null,
 ///     name your binary appropriately or source the shell integration script
 ///     manually.
 @"initial-command": ?Command = null,
+
+/// A wrapper command that is prepended to the final command Ghostty would
+/// otherwise execute, after shell resolution, shell integration, and (on
+/// macOS) the `login(1)` wrapping have all been applied. The wrapper's
+/// arguments are placed before the resolved argv, so the resolved command
+/// runs as a child of the wrapper.
+///
+/// This exists so an embedder can run the shell under a supervisor such as a
+/// session-persistence multiplexer while keeping Ghostty's normal shell
+/// resolution and shell integration fully intact. Without this, an embedder
+/// would have to replace `command` with the wrapper, which loses the user's
+/// configured `command`, shell detection, and integration.
+///
+/// Specified like `command`, e.g. `direct:zmx attach my-session`. Use the
+/// `direct:` prefix to avoid a `/bin/sh -c` roundtrip for the wrapper.
+@"command-wrapper": ?Command = null,
 
 /// Controls when command finished notifications are sent. There are
 /// three options:
@@ -3122,7 +3171,13 @@ keybind: Keybinds = .{},
 ///
 ///  * `vec4 iPreviousCursorStyle` - Style of the previous terminal cursor
 ///
-///  * `vec4 iCursorVisible` - Visibility of the terminal cursor.
+///  * `int iCursorVisible` - Visibility of the terminal cursor.
+///
+///    0 when the cursor is hidden by the running program, and also while it
+///    is scrolled out of the viewport or in the off phase of a blink — the
+///    frames in which no cursor is drawn. The position uniforms keep their
+///    last value in those frames, so a shader that draws the cursor itself
+///    must check this rather than trust `iCurrentCursor`.
 ///
 ///  * `float iTimeCursorChange` - Timestamp of terminal cursor change.
 ///

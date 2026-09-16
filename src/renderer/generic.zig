@@ -574,6 +574,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background: terminal.color.RGB,
             background_opacity: f64,
             background_opacity_cells: bool,
+            background_default_transparent: bool,
             foreground: terminal.color.RGB,
             selection_background: ?configpkg.Config.TerminalColor,
             selection_foreground: ?configpkg.Config.TerminalColor,
@@ -635,6 +636,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return .{
                     .background_opacity = @max(0, @min(1, config.@"background-opacity")),
                     .background_opacity_cells = config.@"background-opacity-cells",
+                    .background_default_transparent = config.@"background-default-transparent",
                     .font_thicken = config.@"font-thicken",
                     .font_thicken_strength = config.@"font-thicken-strength",
                     .font_features = font_features.list,
@@ -730,6 +732,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Render state
                 .cells = .{},
                 .uniforms = .{
+                    .scroll_offset = .{ 0, 0 },
                     .projection_matrix = undefined,
                     .cell_size = undefined,
                     .grid_size = undefined,
@@ -1632,6 +1635,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     else => {},
                 };
 
+                // The embedder composites the default background itself —
+                // the same effect as the glass styles above, but independent
+                // of blur mode and platform. Explicit cell backgrounds are
+                // unaffected (they follow `background-opacity-cells`).
+                if (self.config.background_default_transparent) {
+                    self.uniforms.bg_color[3] = 0;
+                }
+
                 // Prepare our overlay image for upload (or unload). This
                 // has to use our general allocator since it modifies
                 // state that survives frames.
@@ -2418,10 +2429,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     cursor.grid_pos[0] * cell.width + padding.left,
                 );
                 // Top edge, relative to the top of the
-                // screen, of the cell the cursor is in.
+                // screen, of the cell the cursor is in. Grid rows are
+                // drawn shifted while smooth scrolling (see the
+                // scroll_offset uniform), so shift the cursor with them.
                 var pixel_y: f32 = @floatFromInt(
                     cursor.grid_pos[1] * cell.height + padding.top,
                 );
+                pixel_y += self.uniforms.scroll_offset[0] -
+                    self.uniforms.scroll_offset[1] * @as(f32, @floatFromInt(cell.height));
 
                 // If +Y is up in our shaders, we need to flip the coordinate
                 // so that it's instead the top edge of the cell relative to
@@ -2477,6 +2492,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     uniforms.current_cursor_color = cursor_color;
                     uniforms.cursor_change_time = uniforms.time;
                 }
+            } else {
+                // No cursor glyph this frame: the cursor is scrolled out of
+                // the viewport, or in the off phase of a blink. The position
+                // uniforms above keep their last value, so a shader that
+                // draws the cursor itself (cursor-opacity = 0) would leave a
+                // phantom at the stale cell. Report it hidden, which is what
+                // the terminal is showing.
+                uniforms.cursor_visible = 0;
             }
 
             // Update focus uniforms
@@ -2587,6 +2610,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update our uniforms accordingly, otherwise
                 // our background cells will be out of place.
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
+            }
+
+            // Smooth scrolling: where the grid sits relative to the
+            // viewport this frame. A change here is a visible change even
+            // when no cell is dirty (the same rows, drawn a few pixels
+            // over), so it must count as a rebuild or drawFrame would
+            // present the previous frame.
+            const scroll_offset: [2]f32 = .{
+                @floatCast(state.viewport_pixel_offset),
+                @floatFromInt(state.rows_above),
+            };
+            if (!std.meta.eql(scroll_offset, self.uniforms.scroll_offset)) {
+                self.uniforms.scroll_offset = scroll_offset;
+                self.cells_rebuilt = true;
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;

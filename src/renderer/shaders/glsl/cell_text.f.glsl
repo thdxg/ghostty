@@ -17,7 +17,20 @@ const uint ATLAS_COLOR = 1u;
 // Must declare this output for some versions of OpenGL.
 layout(location = 0) out vec4 out_FragColor;
 
+// Position the origin to the upper left
+layout(origin_upper_left) in vec4 gl_FragCoord;
+
 void main() {
+    // Smooth scrolling: a partially revealed row extends into the padding;
+    // clip it to the visible grid. Only while shifted, so glyphs that
+    // legitimately overhang a cell edge are untouched at rest.
+    if (scroll_offset.x != 0.0) {
+        float y = gl_FragCoord.y - grid_padding.x;
+        uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
+        float visible_h = (float(grid_size.y) - 1.0) * cell_size.y;
+        if (y < 0.0 || y >= visible_h) discard;
+    }
+
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
 
