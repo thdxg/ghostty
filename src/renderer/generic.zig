@@ -2370,8 +2370,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            // Cursor visibility
-            uniforms.cursor_visible = @intFromBool(self.terminal_state.cursor.visible);
+            // Cursor visibility is set per frame (see
+            // updateCustomShaderUniformsForFrame), from whether a cursor
+            // glyph was actually drawn rather than from DECTCEM alone.
 
             // Cursor style
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
@@ -2492,13 +2493,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     uniforms.current_cursor_color = cursor_color;
                     uniforms.cursor_change_time = uniforms.time;
                 }
+
+                // Whether a cursor glyph was drawn is the whole answer for
+                // the shader, and a stricter one than DECTCEM: it already
+                // accounts for the viewport, preedit, focus and blink. This
+                // per-frame pass is the only owner of the uniform, and it
+                // runs immediately before the uniforms are synced, so both
+                // arms must assign it -- a one-sided clear would stick at 0
+                // until the next frame the terminal state changed.
+                uniforms.cursor_visible = 1;
             } else {
-                // No cursor glyph this frame: the cursor is scrolled out of
-                // the viewport, or in the off phase of a blink. The position
-                // uniforms above keep their last value, so a shader that
-                // draws the cursor itself (cursor-opacity = 0) would leave a
-                // phantom at the stale cell. Report it hidden, which is what
-                // the terminal is showing.
+                // No cursor glyph this frame: the cursor is hidden by the
+                // program, scrolled out of the viewport, or in the off phase
+                // of a blink. The position uniforms above keep their last
+                // value, so a shader that draws the cursor itself
+                // (cursor-opacity = 0) would leave a phantom at the stale
+                // cell. Report it hidden, which is what the terminal is
+                // showing.
                 uniforms.cursor_visible = 0;
             }
 
