@@ -43,6 +43,8 @@ env:
     .github/downstream/0002-output-activity.patch
     .github/downstream/0003-sync-environ.patch
     .github/downstream/0004-background-default-transparent.patch
+    .github/downstream/0005-smooth-scroll.patch
+    .github/downstream/0006-custom-shader-cursor-hidden-offscreen.patch
   # How far behind upstream HEAD the fork's base may fall before the sync is
   # presumed broken. A daily sync should keep this at 0–1 days.
   MAX_AGE_DAYS: "4"
@@ -91,6 +93,28 @@ jobs:
               echo "::error::Declared downstream file is missing: $f" >&2
               exit 1
             fi
+          done
+
+          # …and the converse: every patch on disk must be declared. Only the
+          # declared list is copied across the sync's reset to upstream, so an
+          # undeclared patch is a change that will vanish. Without this the
+          # symptom surfaces below as the patch file itself showing up as an
+          # unallowlisted path, which reads as "main is reverting upstream
+          # source" — the wrong diagnosis for a one-line omission here.
+          # Normalized to single-space separators so the membership test below
+          # doesn't depend on how the YAML scalar folds its whitespace.
+          declared=" "
+          for f in $DOWNSTREAM_FILES; do declared="${declared}${f} "; done
+          shopt -s nullglob
+          for p in .github/downstream/*.patch; do
+            case "$declared" in
+              *" $p "*) ;;
+              *)
+                echo "::error::Downstream patch is not declared in DOWNSTREAM_FILES: $p" >&2
+                echo "::error::Add it to DOWNSTREAM_FILES in BOTH assert-no-drift.yml and sync-upstream.yml." >&2
+                exit 1
+                ;;
+            esac
           done
 
           # (3) Build the allowlist: DOWNSTREAM_FILES + every path declared
