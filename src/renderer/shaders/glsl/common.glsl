@@ -17,6 +17,10 @@ layout(binding = 1, std140) uniform Globals {
     uniform vec2 cell_size;
     uniform uint grid_size_packed_2u16;
     uniform vec4 grid_padding;
+    // Smooth scrolling: .x = sub-row viewport offset in pixels (positive:
+    // content shifted down), .y = grid rows above the viewport (0 or 1).
+    // Grid row y is drawn at (y - .y) * cell_size.y + .x.
+    uniform vec2 scroll_offset;
     uniform uint padding_extend;
     uniform float min_contrast;
     uniform uint cursor_pos_packed_2u16;

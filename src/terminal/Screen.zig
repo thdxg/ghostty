@@ -61,6 +61,16 @@ saved_cursor: ?SavedCursor = null,
 /// automatically setup tracking.
 selection: ?Selection = null,
 
+/// Sub-row offset of the viewport in pixels, for smooth (pixel-precise)
+/// scrolling. Positive means the viewport sits that many pixels *above*
+/// its row-aligned position (content is drawn shifted down, revealing the
+/// bottom of the row above); negative means below. Always within one cell
+/// height. Any row-level viewport move resets it: the offset only ever
+/// describes the remainder of the scroll gesture that produced the current
+/// viewport, never a stale one. Rendering validates it against the screen
+/// (an offset pointing at a row that doesn't exist is drawn as zero).
+viewport_pixel_offset: f64 = 0,
+
 /// The charset state
 charset: CharsetState = .{},
 
@@ -1625,6 +1635,10 @@ pub const Scroll = union(enum) {
 /// Scroll the viewport of the terminal grid.
 pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     defer self.assertIntegrity();
+
+    // A row-level move invalidates any sub-row remainder; the scroll
+    // callback re-publishes its own remainder after the move.
+    self.viewport_pixel_offset = 0;
 
     if (comptime build_options.kitty_graphics) {
         // No matter what, scrolling marks our image state as dirty since
