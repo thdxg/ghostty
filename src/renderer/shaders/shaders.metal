@@ -16,9 +16,11 @@ struct Uniforms {
   ushort2 grid_size;
   float4 grid_padding;
   // Smooth scrolling: .x = sub-row viewport offset in pixels (positive:
-  // content shifted down), .y = grid rows above the viewport (0 or 1).
-  // Grid row y is drawn at (y - .y) * cell_size.y + .x.
-  float2 scroll_offset;
+  // content shifted down), .y = grid rows above the viewport, .z = the
+  // height the viewport's rows don't account for, which the shifted grid
+  // may draw into (it is surface, not padding). Grid row y is drawn at
+  // (y - .y) * cell_size.y + .x.
+  float4 scroll_offset;
   uint8_t padding_extend;
   float min_contrast;
   ushort2 cursor_pos;
@@ -465,9 +467,14 @@ fragment float4 cell_bg_fragment(
   // applies the shift, so a partially revealed row never leaks into
   // the padding.
   float2 rel = in.position.xy - uniforms.grid_padding.wx;
-  float extra_rows = uniforms.scroll_offset.x != 0.0 ? 1.0 : 0.0;
+  float extra_rows = uniforms.scroll_offset.x != 0.0
+      ? max(uniforms.scroll_offset.y, 1.0)
+      : 0.0;
   float2 visible = uniforms.cell_size *
       float2(uniforms.grid_size.x, float(uniforms.grid_size.y) - extra_rows);
+  // A shifted grid sits on the height its rows don't account for, so that
+  // strip is grid, not padding.
+  visible.y += uniforms.scroll_offset.x != 0.0 ? uniforms.scroll_offset.z : 0.0;
 
   float4 bg = float4(0.0);
 
@@ -716,7 +723,10 @@ fragment float4 cell_text_fragment(
   // legitimately overhang a cell edge are untouched at rest.
   if (uniforms.scroll_offset.x != 0.0) {
     float y = in.position.y - uniforms.grid_padding.x;
-    float visible_h = (float(uniforms.grid_size.y) - 1.0) * uniforms.cell_size.y;
+    float extra_rows = max(uniforms.scroll_offset.y, 1.0);
+    float visible_h =
+        (float(uniforms.grid_size.y) - extra_rows) * uniforms.cell_size.y +
+        uniforms.scroll_offset.z;
     if (y < 0.0 || y >= visible_h) discard_fragment();
   }
 

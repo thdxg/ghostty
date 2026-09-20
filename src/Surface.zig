@@ -4813,12 +4813,32 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Smooth scrolling draws the viewport shifted by a sub-row offset;
     // undo it so the hit-tested cell is the one under the pointer.
-    const offset: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
+    const offset: f64 = self.viewportPixelShift();
 
     // Get our grid cell
     const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos - offset } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
+}
+
+/// How far down the renderer is drawing the viewport, in pixels: the
+/// remainder of a scroll gesture plus the height the viewport's rows don't
+/// account for, which under `smooth-scroll` the grid sits on rather than
+/// leaving as padding (see `terminal.RenderState.Geometry`).
+///
+/// This mirrors what the renderer resolves rather than reading it back: the
+/// renderer drops a shift it has no row to reveal (the top of scrollback),
+/// and this doesn't know that, so a click there can land a row off. The
+/// alternative is a lock and a round trip per mouse move.
+fn viewportPixelShift(self: Surface) f64 {
+    const gesture: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
+    if (!self.config.smooth_scroll) return gesture;
+    const cell_height = self.size.cell.height;
+    if (cell_height == 0) return gesture;
+    const laid_out = @as(u32, self.size.grid().rows) * cell_height;
+    const height = self.size.terminal().height;
+    if (height <= laid_out) return gesture;
+    return gesture + @as(f64, @floatFromInt(height - laid_out));
 }
 
 /// Scroll to the bottom of the viewport.
