@@ -598,6 +598,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             blending: configpkg.Config.AlphaBlending,
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
+            smooth_scroll: bool,
             custom_shader_animation: configpkg.CustomShaderAnimation,
 
             pub fn init(
@@ -674,6 +675,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .blending = config.@"alpha-blending",
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
+                    .smooth_scroll = config.@"smooth-scroll",
                     .custom_shader_animation = config.@"custom-shader-animation",
                     .arena = arena,
                 };
@@ -732,7 +734,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Render state
                 .cells = .{},
                 .uniforms = .{
-                    .scroll_offset = .{ 0, 0 },
+                    .scroll_offset = .{ 0, 0, 0, 0 },
                     .projection_matrix = undefined,
                     .cell_size = undefined,
                     .grid_size = undefined,
@@ -1399,6 +1401,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try self.terminal_state.beginUpdate(
                     self.alloc,
                     state.terminal,
+                    self.viewportGeometry(),
                 );
 
                 // If our terminal state is dirty at all we need to redo
@@ -2593,6 +2596,30 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cp_offset: usize,
         };
 
+        /// The pixels the viewport's rows don't account for, handed to the
+        /// render state so the grid can sit on them instead of leaving them
+        /// as a strip of padding (see `terminal.RenderState.Geometry`).
+        ///
+        /// A grid only comes in whole rows, so this leftover grows as the
+        /// surface is resized until it is a full row and the viewport takes
+        /// one — and everything on screen jumps a cell at that instant.
+        /// Under `smooth-scroll` the grid is drawn this much lower instead,
+        /// with the row above partly revealed, so the same sequence of
+        /// sizes moves the content continuously.
+        fn viewportGeometry(self: *const Self) terminal.RenderState.Geometry {
+            if (!self.config.smooth_scroll) return .none;
+            const cell_height = self.size.cell.height;
+            if (cell_height == 0) return .none;
+            const rows = self.size.grid().rows;
+            const laid_out = @as(u32, rows) * cell_height;
+            const height = self.size.terminal().height;
+            if (height <= laid_out) return .none;
+            return .{
+                .cell_height = cell_height,
+                .pixel_pad = @floatFromInt(height - laid_out),
+            };
+        }
+
         /// Convert the terminal state to GPU cells stored in CPU memory. These
         /// are then synced to the GPU in the next frame. This only updates CPU
         /// memory and doesn't touch the GPU.
@@ -2628,9 +2655,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // when no cell is dirty (the same rows, drawn a few pixels
             // over), so it must count as a rebuild or drawFrame would
             // present the previous frame.
-            const scroll_offset: [2]f32 = .{
+            const scroll_offset: [4]f32 = .{
                 @floatCast(state.viewport_pixel_offset),
                 @floatFromInt(state.rows_above),
+                // The leftover height only counts while the grid is
+                // actually shifted onto it; at rest it stays padding.
+                if (state.viewport_pixel_offset != 0)
+                    @floatCast(self.viewportGeometry().pixel_pad)
+                else
+                    0,
+                0,
             };
             if (!std.meta.eql(scroll_offset, self.uniforms.scroll_offset)) {
                 self.uniforms.scroll_offset = scroll_offset;
