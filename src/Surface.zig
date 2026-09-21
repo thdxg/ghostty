@@ -317,6 +317,7 @@ const DerivedConfig = struct {
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
     mouse_shift_capture: configpkg.MouseShiftCapture,
+    smooth_scroll: bool,
     fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
     macos_option_as_alt: ?input.OptionAsAlt,
@@ -397,6 +398,7 @@ const DerivedConfig = struct {
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
             .mouse_shift_capture = config.@"mouse-shift-capture",
+            .smooth_scroll = config.@"smooth-scroll",
             .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
             .macos_option_as_alt = config.@"macos-option-as-alt",
@@ -654,6 +656,7 @@ pub fn init(
         // Initialize our IO backend
         var io_exec = try termio.Exec.init(alloc, .{
             .command = command,
+            .command_wrapper = config.@"command-wrapper",
             .env = env,
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
@@ -1099,6 +1102,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .renderer_health => |health| self.updateRendererHealth(health),
 
         .scrollbar => |scrollbar| self.updateScrollbar(scrollbar),
+
+        .output_activity => |scrollbar| self.updateOutputActivity(scrollbar),
 
         .present_surface => try self.presentSurface(),
 
@@ -1726,6 +1731,22 @@ fn redraw(self: *Surface) void {
         {},
     ) catch |err| {
         log.warn("failed to notify app of frame present err={}", .{err});
+    };
+}
+
+/// Called on each throttled output-activity heartbeat from the IO path.
+/// Unlike `.scrollbar` (a renderer-track signal that stops while the
+/// surface is occluded), this fires whenever the child produces output
+/// regardless of visibility, so embedders can drive an activity indicator
+/// for in-place TUI redraws and backgrounded surfaces. The payload carries
+/// the current scrollbar geometry.
+fn updateOutputActivity(self: *Surface, scrollbar: terminal.Scrollbar) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .output_activity,
+        scrollbar,
+    ) catch |err| {
+        log.warn("failed to notify app of output activity err={}", .{err});
     };
 }
 
@@ -3543,14 +3564,18 @@ pub fn scrollCallback(
             break :y .{};
         }
 
-        // We scroll by the number of rows in the offset and save the remainder
+        // We scroll by the number of whole rows in the offset and save the
+        // remainder. The remainder must be computed from the truncated row
+        // count: `poff - (poff / cell_size) * cell_size` is identically
+        // zero, which threw the sub-row part away on every commit and made
+        // smooth scrolling snap back by that much each time a row landed.
         const amount = poff / cell_size;
         assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
 
         // Round towards zero.
         const delta: isize = @intFromFloat(@trunc(amount));
         assert(@abs(delta) >= 1);
+        self.mouse.pending_scroll_y = poff - (@as(f64, @floatFromInt(delta)) * cell_size);
 
         break :y .{ .delta = delta };
     };
@@ -3657,6 +3682,18 @@ pub fn scrollCallback(
             // is negative down but our viewport is positive down.
             self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
         }
+
+        // Smooth scrolling: publish the sub-row remainder of a precision
+        // gesture so the renderer can draw the viewport between rows.
+        // scrollViewport above reset the previous remainder; a discrete
+        // wheel never has one, and with the key off the remainder stays
+        // an accumulator detail. Sign matches yoff: positive is content
+        // moving down. The renderer validates it against the screen.
+        self.io.terminal.screens.active.viewport_pixel_offset =
+            if (self.config.smooth_scroll and scroll_mods.precision)
+                self.mouse.pending_scroll_y
+            else
+                0;
     }
 
     try self.queueRender();
@@ -4774,10 +4811,34 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+    // Smooth scrolling draws the viewport shifted by a sub-row offset;
+    // undo it so the hit-tested cell is the one under the pointer.
+    const offset: f64 = self.viewportPixelShift();
+
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos - offset } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
+}
+
+/// How far down the renderer is drawing the viewport, in pixels: the
+/// remainder of a scroll gesture plus the height the viewport's rows don't
+/// account for, which under `smooth-scroll` the grid sits on rather than
+/// leaving as padding (see `terminal.RenderState.Geometry`).
+///
+/// This mirrors what the renderer resolves rather than reading it back: the
+/// renderer drops a shift it has no row to reveal (the top of scrollback),
+/// and this doesn't know that, so a click there can land a row off. The
+/// alternative is a lock and a round trip per mouse move.
+fn viewportPixelShift(self: Surface) f64 {
+    const gesture: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
+    if (!self.config.smooth_scroll) return gesture;
+    const cell_height = self.size.cell.height;
+    if (cell_height == 0) return gesture;
+    const laid_out = @as(u32, self.size.grid().rows) * cell_height;
+    const height = self.size.terminal().height;
+    if (height <= laid_out) return gesture;
+    return gesture + @as(f64, @floatFromInt(height - laid_out));
 }
 
 /// Scroll to the bottom of the viewport.
