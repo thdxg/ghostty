@@ -110,7 +110,7 @@ index 9b2012cc1..913cceaaf 100644
              return error.BenchmarkFailed;
          };
 diff --git a/src/config/Config.zig b/src/config/Config.zig
-index 208fc73ce..ec72866b7 100644
+index 2bc806c5f..475c0b76f 100644
 --- a/src/config/Config.zig
 +++ b/src/config/Config.zig
 @@ -999,6 +999,21 @@ palette: Palette = .{},
@@ -136,7 +136,7 @@ index 208fc73ce..ec72866b7 100644
  /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
  /// or greater than 1 will be clamped to the nearest valid value.
 diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
-index 53d33a9f5..acad68f45 100644
+index 9ec3c8377..372f39f42 100644
 --- a/src/renderer/generic.zig
 +++ b/src/renderer/generic.zig
 @@ -598,6 +598,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
@@ -171,7 +171,7 @@ index 53d33a9f5..acad68f45 100644
                  );
  
                  // If our terminal state is dirty at all we need to redo
-@@ -2429,10 +2433,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+@@ -2428,10 +2432,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                      cursor.grid_pos[0] * cell.width + padding.left,
                  );
                  // Top edge, relative to the top of the
@@ -187,38 +187,38 @@ index 53d33a9f5..acad68f45 100644
  
                  // If +Y is up in our shaders, we need to flip the coordinate
                  // so that it's instead the top edge of the cell relative to
-@@ -2588,6 +2596,30 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+@@ -2569,6 +2577,30 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
              cp_offset: usize,
          };
  
-+        /// The pixels the viewport's rows don't account for, handed to the
-+        /// render state so the grid can sit on them instead of leaving them
-+        /// as a strip of padding (see `terminal.RenderState.Geometry`).
++        /// The pixel geometry the render state needs to measure the height
++        /// the viewport's rows don't account for, so the grid can sit on it
++        /// instead of leaving it as a strip of padding (see
++        /// `terminal.RenderState.Geometry`).
 +        ///
-+        /// A grid only comes in whole rows, so this leftover grows as the
++        /// A grid only comes in whole rows, so that leftover grows as the
 +        /// surface is resized until it is a full row and the viewport takes
 +        /// one — and everything on screen jumps a cell at that instant.
-+        /// Under `smooth-scroll` the grid is drawn this much lower instead,
++        /// Under `smooth-scroll` the grid is drawn that much lower instead,
 +        /// with the row above partly revealed, so the same sequence of
 +        /// sizes moves the content continuously.
++        ///
++        /// Only the pixels are handed over; the render state measures them
++        /// against the terminal's rows, not this renderer's grid — the two
++        /// are resized on different threads, and a frame caught between
++        /// them drew the grid a whole cell off.
 +        fn viewportGeometry(self: *const Self) terminal.RenderState.Geometry {
 +            if (!self.config.smooth_scroll) return .none;
-+            const cell_height = self.size.cell.height;
-+            if (cell_height == 0) return .none;
-+            const rows = self.size.grid().rows;
-+            const laid_out = @as(u32, rows) * cell_height;
-+            const height = self.size.terminal().height;
-+            if (height <= laid_out) return .none;
 +            return .{
-+                .cell_height = cell_height,
-+                .pixel_pad = @floatFromInt(height - laid_out),
++                .cell_height = self.size.cell.height,
++                .terminal_height = self.size.terminal().height,
 +            };
 +        }
 +
          /// Convert the terminal state to GPU cells stored in CPU memory. These
          /// are then synced to the GPU in the next frame. This only updates CPU
          /// memory and doesn't touch the GPU.
-@@ -2618,6 +2650,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+@@ -2599,6 +2631,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                  self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
              }
  
@@ -233,7 +233,7 @@ index 53d33a9f5..acad68f45 100644
 +                // The leftover height only counts while the grid is
 +                // actually shifted onto it; at rest it stays padding.
 +                if (state.viewport_pixel_offset != 0)
-+                    @floatCast(self.viewportGeometry().pixel_pad)
++                    @floatCast(state.viewport_pixel_pad)
 +                else
 +                    0,
 +                0,
@@ -614,10 +614,10 @@ index c108456f2..539175eba 100644
  }
  
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index 6bcddb2c2..503759011 100644
+index 6bcddb2c2..6a847039d 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
-@@ -110,6 +110,22 @@ pub const RenderState = struct {
+@@ -110,6 +110,27 @@ pub const RenderState = struct {
      /// values for comparison.
      viewport_pin: ?PageList.Pin = null,
  
@@ -637,10 +637,15 @@ index 6bcddb2c2..503759011 100644
 +    viewport_pixel_offset: f64 = 0,
 +    rows_above: size.CellCountInt = 0,
 +
++    /// The leftover height the grid was laid on this update (see
++    /// `Geometry`), for the renderer to draw as grid rather than padding
++    /// while the offset is non-zero. Zero without geometry.
++    viewport_pixel_pad: f64 = 0,
++
      /// The cached selection so we can avoid expensive selection calculations
      /// if possible.
      selection_cache: ?SelectionCache = null,
-@@ -340,15 +356,38 @@ pub const RenderState = struct {
+@@ -340,15 +361,45 @@ pub const RenderState = struct {
      ///
      /// This will reset the terminal dirty state since it is consumed
      /// by this render state update.
@@ -660,9 +665,9 @@ index 6bcddb2c2..503759011 100644
 +    /// What the renderer knows about the viewport that the terminal does
 +    /// not: pixels.
 +    ///
-+    /// `pixel_pad` is the height left over once the viewport's rows have
-+    /// been laid out — `terminal_height - rows * cell_height`, always less
-+    /// than a cell. A grid only comes in whole rows, so as a surface is
++    /// The leftover is the height left over once the viewport's rows have
++    /// been laid out — `terminal_height - rows * cell_height`, under a cell
++    /// once the resize has settled. A grid only comes in whole rows, so as a surface is
 +    /// resized that leftover grows until it is a full row and the viewport
 +    /// takes one; everything on screen then jumps a cell at once. Drawing
 +    /// the grid that leftover lower, with the row above partly revealed,
@@ -672,7 +677,14 @@ index 6bcddb2c2..503759011 100644
 +    /// scrolling is off, which is the behavior every renderer had before.
 +    pub const Geometry = struct {
 +        cell_height: u32 = 0,
-+        pixel_pad: f64 = 0,
++        /// The height of the terminal area (the screen less padding) in
++        /// pixels. The leftover is measured here, against the terminal's
++        /// own row count, and not by the renderer against its grid: the
++        /// two change on different threads, and a frame caught between
++        /// them drew the grid a whole cell off — the renderer already had
++        /// the new height while the terminal still had the old rows, or
++        /// the reverse — which every divider drag showed as a flash.
++        terminal_height: u32 = 0,
 +
 +        pub const none: Geometry = .{};
 +    };
@@ -680,7 +692,7 @@ index 6bcddb2c2..503759011 100644
      /// Begin an update of the render state to the latest terminal
      /// state. Every begin must be completed with an `endUpdate` call
      /// before the render state is read.
-@@ -374,9 +413,56 @@ pub const RenderState = struct {
+@@ -374,9 +425,89 @@ pub const RenderState = struct {
          self: *RenderState,
          alloc: Allocator,
          t: *Terminal,
@@ -698,7 +710,40 @@ index 6bcddb2c2..503759011 100644
 +        var viewport_pin = base_pin;
 +        var rows: size.CellCountInt = s.pages.rows;
 +        var rows_above: size.CellCountInt = 0;
-+        var pixel_offset: f64 = s.viewport_pixel_offset + geometry.pixel_pad;
++
++        // The gesture's remainder is validated on its own, before the
++        // viewport's leftover height is added: a remainder pointing at a
++        // row that doesn't exist is dropped, and the leftover still shifts
++        // the grid. Validating the sum instead made a gesture pinned at the
++        // bottom of scrollback bob the content: its remainder cycles
++        // through (-cell, 0] as row after row fails to commit, so the sum
++        // crossed zero on every event and flipped the grid between sat on
++        // the leftover and not — a wiggle of up to the leftover's height.
++        const gesture: f64 = gesture: {
++            const raw = s.viewport_pixel_offset;
++            if (raw > 0 and base_pin.up(1) == null) break :gesture 0;
++            if (raw < 0) {
++                const below = if (s.pages.getBottomRight(.viewport)) |br|
++                    br.down(1)
++                else
++                    null;
++                if (below == null) break :gesture 0;
++            }
++            break :gesture raw;
++        };
++        // The viewport's leftover height, from the terminal's row count
++        // (see `Geometry`). Mid-resize it can reach a cell or more — the
++        // terminal still has the old rows while the renderer has the new
++        // height — and the sum then reveals a second row, which is what
++        // keeps the content where it was until the rows catch up. More
++        // rows than fit is no leftover at all.
++        const pixel_pad: f64 = pad: {
++            if (geometry.cell_height == 0) break :pad 0;
++            const laid_out = @as(u64, s.pages.rows) * geometry.cell_height;
++            if (geometry.terminal_height <= laid_out) break :pad 0;
++            break :pad @floatFromInt(geometry.terminal_height - laid_out);
++        };
++        var pixel_offset: f64 = gesture + pixel_pad;
 +        if (pixel_offset > 0) {
 +            // How many rows the offset spans. A gesture's own remainder is
 +            // always under a cell, so with no cell height to measure
@@ -738,7 +783,7 @@ index 6bcddb2c2..503759011 100644
          const redraw = redraw: {
              // If our screen key changed, we need to do a full rebuild
              // because our render state is viewport-specific.
-@@ -398,9 +484,11 @@ pub const RenderState = struct {
+@@ -398,9 +529,11 @@ pub const RenderState = struct {
                  if (v > 0) break :redraw true;
              }
  
@@ -753,7 +798,7 @@ index 6bcddb2c2..503759011 100644
              {
                  break :redraw true;
              }
-@@ -414,9 +502,11 @@ pub const RenderState = struct {
+@@ -414,9 +547,12 @@ pub const RenderState = struct {
          };
  
          // Always set our cheap fields, its more expensive to compare
@@ -762,11 +807,12 @@ index 6bcddb2c2..503759011 100644
          self.cols = s.pages.cols;
          self.viewport_pin = viewport_pin;
 +        self.viewport_pixel_offset = pixel_offset;
++        self.viewport_pixel_pad = pixel_pad;
 +        self.rows_above = rows_above;
          self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
          self.cursor.cell = s.cursor.page_cell.*;
          self.cursor.style = s.cursor.style;
-@@ -1041,12 +1131,14 @@ pub const RenderState = struct {
+@@ -1041,12 +1177,14 @@ pub const RenderState = struct {
  
          // Our viewport point is sent in by the caller and can't be trusted.
          // If it is outside the valid area then just return empty because
@@ -784,7 +830,7 @@ index 6bcddb2c2..503759011 100644
          const link_page: *page.Page = link_pin.node.page();
          const link = link: {
              const rac = link_page.getRowAndCell(
-@@ -1701,7 +1793,7 @@ test "begin and end update" {
+@@ -1701,7 +1839,7 @@ test "begin and end update" {
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -793,7 +839,7 @@ index 6bcddb2c2..503759011 100644
  
      // We should have pending style runs on row 0: one for the bold
      // run and one for the italic run.
-@@ -2395,3 +2487,140 @@ test "dirty row resets highlights" {
+@@ -2395,3 +2533,194 @@ test "dirty row resets highlights" {
          try testing.expectEqual(0, row_highlights[0].items.len);
      }
  }
@@ -895,7 +941,7 @@ index 6bcddb2c2..503759011 100644
 +    // A viewport 6px taller than its three rows: the grid is drawn that
 +    // much lower and the row above is revealed by the same amount, so the
 +    // next pixel of height moves the content rather than the row count.
-+    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .pixel_pad = 6 });
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 36 });
 +    state.endUpdate();
 +    try testing.expectEqual(6, state.viewport_pixel_offset);
 +    try testing.expectEqual(1, state.rows_above);
@@ -905,10 +951,23 @@ index 6bcddb2c2..503759011 100644
 +        try testing.expectEqual('2', cells[0].get(0).raw.codepoint());
 +    }
 +
++    // A gesture pinned at the bottom of scrollback has nothing below to
++    // reveal, so its remainder is dropped on its own and the grid stays
++    // sat on the leftover — for any remainder, since the remainder cycles
++    // through a cell as the gesture keeps failing to commit a row.
++    for ([_]f64{ -4, -8 }) |remainder| {
++        t.screens.active.viewport_pixel_offset = remainder;
++        try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 36 });
++        state.endUpdate();
++        try testing.expectEqual(6, state.viewport_pixel_offset);
++        try testing.expectEqual(1, state.rows_above);
++        try testing.expectEqual(4, state.rows);
++    }
++
 +    // It adds to a gesture's own remainder, and a sum over a cell reveals
 +    // a second row rather than tearing a strip nothing fills.
 +    t.screens.active.viewport_pixel_offset = 6;
-+    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .pixel_pad = 6 });
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 36 });
 +    state.endUpdate();
 +    try testing.expectEqual(12, state.viewport_pixel_offset);
 +    try testing.expectEqual(2, state.rows_above);
@@ -922,11 +981,52 @@ index 6bcddb2c2..503759011 100644
 +    // to the rows actually revealed.
 +    t.screens.active.viewport_pixel_offset = 0;
 +    t.scrollViewport(.top);
-+    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .pixel_pad = 6 });
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 36 });
 +    state.endUpdate();
 +    try testing.expectEqual(0, state.viewport_pixel_offset);
 +    try testing.expectEqual(0, state.rows_above);
 +    try testing.expectEqual(3, state.rows);
++
++    // The leftover follows the terminal's rows, not the renderer's grid,
++    // so the grid stays put whichever side of a resize a frame lands on.
++    // Three rows in 45px leave 15 — over a cell — so two rows above are
++    // revealed and row "3" sits at 0 × 10 + 15 = 15px...
++    t.scrollViewport(.bottom);
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 45 });
++    state.endUpdate();
++    try testing.expectEqual(15, state.viewport_pixel_offset);
++    try testing.expectEqual(15, state.viewport_pixel_pad);
++    try testing.expectEqual(2, state.rows_above);
++    try testing.expectEqual(5, state.rows);
++    {
++        const cells = state.row_data.slice().items(.cells);
++        try testing.expectEqual('1', cells[0].get(0).raw.codepoint());
++        try testing.expectEqual('3', cells[2].get(0).raw.codepoint());
++    }
++
++    // ...and once the terminal takes the fourth row, 5px are left, one
++    // row above is revealed, and row "3" is still at 1 × 10 + 5 = 15px.
++    try t.resize(alloc, .{ .cols = 10, .rows = 4 });
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 45 });
++    state.endUpdate();
++    try testing.expectEqual(5, state.viewport_pixel_offset);
++    try testing.expectEqual(5, state.viewport_pixel_pad);
++    try testing.expectEqual(1, state.rows_above);
++    try testing.expectEqual(5, state.rows);
++    {
++        const cells = state.row_data.slice().items(.cells);
++        try testing.expectEqual('1', cells[0].get(0).raw.codepoint());
++        try testing.expectEqual('3', cells[2].get(0).raw.codepoint());
++    }
++
++    // The other order — the terminal has the rows before the renderer has
++    // the height: four rows don't fit in 36px, so there is no leftover.
++    try state.beginUpdate(alloc, &t, .{ .cell_height = 10, .terminal_height = 36 });
++    state.endUpdate();
++    try testing.expectEqual(0, state.viewport_pixel_offset);
++    try testing.expectEqual(0, state.viewport_pixel_pad);
++    try testing.expectEqual(0, state.rows_above);
++    try testing.expectEqual(4, state.rows);
 +
 +    // No geometry, no shift — what every caller that has no pixels gets.
 +    t.scrollViewport(.bottom);

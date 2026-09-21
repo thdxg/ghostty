@@ -2596,27 +2596,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cp_offset: usize,
         };
 
-        /// The pixels the viewport's rows don't account for, handed to the
-        /// render state so the grid can sit on them instead of leaving them
-        /// as a strip of padding (see `terminal.RenderState.Geometry`).
+        /// The pixel geometry the render state needs to measure the height
+        /// the viewport's rows don't account for, so the grid can sit on it
+        /// instead of leaving it as a strip of padding (see
+        /// `terminal.RenderState.Geometry`).
         ///
-        /// A grid only comes in whole rows, so this leftover grows as the
+        /// A grid only comes in whole rows, so that leftover grows as the
         /// surface is resized until it is a full row and the viewport takes
         /// one — and everything on screen jumps a cell at that instant.
-        /// Under `smooth-scroll` the grid is drawn this much lower instead,
+        /// Under `smooth-scroll` the grid is drawn that much lower instead,
         /// with the row above partly revealed, so the same sequence of
         /// sizes moves the content continuously.
+        ///
+        /// Only the pixels are handed over; the render state measures them
+        /// against the terminal's rows, not this renderer's grid — the two
+        /// are resized on different threads, and a frame caught between
+        /// them drew the grid a whole cell off.
         fn viewportGeometry(self: *const Self) terminal.RenderState.Geometry {
             if (!self.config.smooth_scroll) return .none;
-            const cell_height = self.size.cell.height;
-            if (cell_height == 0) return .none;
-            const rows = self.size.grid().rows;
-            const laid_out = @as(u32, rows) * cell_height;
-            const height = self.size.terminal().height;
-            if (height <= laid_out) return .none;
             return .{
-                .cell_height = cell_height,
-                .pixel_pad = @floatFromInt(height - laid_out),
+                .cell_height = self.size.cell.height,
+                .terminal_height = self.size.terminal().height,
             };
         }
 
@@ -2661,7 +2661,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // The leftover height only counts while the grid is
                 // actually shifted onto it; at rest it stays padding.
                 if (state.viewport_pixel_offset != 0)
-                    @floatCast(self.viewportGeometry().pixel_pad)
+                    @floatCast(state.viewport_pixel_pad)
                 else
                     0,
                 0,
