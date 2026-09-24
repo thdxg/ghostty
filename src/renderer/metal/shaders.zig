@@ -213,6 +213,19 @@ pub const Uniforms = extern struct {
     /// top, right, bottom, left.
     grid_padding: [4]f32 align(16),
 
+    /// Smooth scrolling. `.x` is the sub-row viewport offset in pixels
+    /// (positive: content drawn shifted down); `.y` is how many grid
+    /// rows sit above the terminal viewport. Grid row `y` is drawn at
+    /// `(y - scroll_offset.y) * cell_size.y + scroll_offset.x`.
+    ///
+    /// `.z` is the height the viewport's rows don't account for —
+    /// `terminal_height - rows * cell_height` — which the shifted grid is
+    /// allowed to draw into, since it is real surface, not padding. It is
+    /// what lets the grid sit a few pixels lower so a resize moves the
+    /// content continuously instead of a row at a time. Zero at rest.
+    /// `.w` is unused.
+    scroll_offset: [4]f32 align(16),
+
     /// Bit mask defining which directions to
     /// extend cell colors in to the padding.
     /// Order, LSB first: left, right, up, down
