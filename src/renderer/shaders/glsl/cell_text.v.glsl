@@ -49,6 +49,10 @@ void main() {
     // Convert the grid x, y into world space x, y by accounting for cell size
     vec2 cell_pos = cell_size * vec2(grid_pos);
 
+    // Smooth scrolling: grid rows are shifted by the sub-row offset, with
+    // an extra row above the viewport drawn at negative y.
+    cell_pos.y += scroll_offset.x - scroll_offset.y * cell_size.y;
+
     int vid = gl_VertexID;
 
     // We use a triangle strip with 4 vertices to render quads,
