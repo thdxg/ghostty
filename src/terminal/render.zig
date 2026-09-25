@@ -429,84 +429,14 @@ pub const RenderState = struct {
     ) Allocator.Error!void {
         const s: *Screen = t.screens.active;
 
-        // Smooth scrolling: honor a sub-row offset only as far as the rows
-        // it reveals exist, and widen our row range to include them. The
-        // gesture's remainder and the viewport's own leftover height both
-        // shift the grid down, so they add (see Geometry); a sum over a
-        // cell simply reveals more than one row.
-        const base_pin = s.pages.getTopLeft(.viewport);
-        var viewport_pin = base_pin;
-        var rows: size.CellCountInt = s.pages.rows;
-        var rows_above: size.CellCountInt = 0;
-
-        // The gesture's remainder is validated on its own, before the
-        // viewport's leftover height is added: a remainder pointing at a
-        // row that doesn't exist is dropped, and the leftover still shifts
-        // the grid. Validating the sum instead made a gesture pinned at the
-        // bottom of scrollback bob the content: its remainder cycles
-        // through (-cell, 0] as row after row fails to commit, so the sum
-        // crossed zero on every event and flipped the grid between sat on
-        // the leftover and not — a wiggle of up to the leftover's height.
-        const gesture: f64 = gesture: {
-            const raw = s.viewport_pixel_offset;
-            if (raw > 0 and base_pin.up(1) == null) break :gesture 0;
-            if (raw < 0) {
-                const below = if (s.pages.getBottomRight(.viewport)) |br|
-                    br.down(1)
-                else
-                    null;
-                if (below == null) break :gesture 0;
-            }
-            break :gesture raw;
-        };
-        // The viewport's leftover height, from the terminal's row count
-        // (see `Geometry`). Mid-resize it can reach a cell or more — the
-        // terminal still has the old rows while the renderer has the new
-        // height — and the sum then reveals a second row, which is what
-        // keeps the content where it was until the rows catch up. More
-        // rows than fit is no leftover at all.
-        const pixel_pad: f64 = pad: {
-            if (geometry.cell_height == 0) break :pad 0;
-            const laid_out = @as(u64, s.pages.rows) * geometry.cell_height;
-            if (geometry.terminal_height <= laid_out) break :pad 0;
-            break :pad @floatFromInt(geometry.terminal_height - laid_out);
-        };
-        var pixel_offset: f64 = gesture + pixel_pad;
-        if (pixel_offset > 0) {
-            // How many rows the offset spans. A gesture's own remainder is
-            // always under a cell, so with no cell height to measure
-            // against — every caller that passes no geometry — one row is
-            // the answer and nothing is capped.
-            const cell_height: f64 = @floatFromInt(geometry.cell_height);
-            const wanted: usize = if (geometry.cell_height > 0) @intFromFloat(@min(
-                @ceil(pixel_offset / cell_height),
-                @as(f64, @floatFromInt(s.pages.rows)),
-            )) else 1;
-            while (rows_above < wanted) {
-                const above = viewport_pin.up(1) orelse break;
-                viewport_pin = above;
-                rows += 1;
-                rows_above += 1;
-            }
-            if (rows_above == 0) {
-                // Nothing above to reveal: the grid stays where it is.
-                pixel_offset = 0;
-            } else if (geometry.cell_height > 0) {
-                // Scrollback ran out before the offset did: shift only as
-                // far as the rows we actually have, or the grid would be
-                // drawn off a strip nothing fills.
-                pixel_offset = @min(
-                    pixel_offset,
-                    @as(f64, @floatFromInt(rows_above)) * cell_height,
-                );
-            }
-        } else if (pixel_offset < 0) {
-            const below = if (s.pages.getBottomRight(.viewport)) |br|
-                br.down(1)
-            else
-                null;
-            if (below != null) rows += 1 else pixel_offset = 0;
-        }
+        // Smooth scrolling: which rows this update holds and where the grid
+        // sits. The surface hit-tests the pointer with the same answer.
+        const shift = resolveShift(s, geometry);
+        const viewport_pin = shift.pin;
+        const rows = shift.rows;
+        const rows_above = shift.rows_above;
+        const pixel_offset = shift.pixel_offset;
+        const pixel_pad = shift.pixel_pad;
 
         const redraw = redraw: {
             // If our screen key changed, we need to do a full rebuild
@@ -944,6 +874,124 @@ pub const RenderState = struct {
             }
         }
         self.pending_styles.clearRetainingCapacity();
+    }
+
+    /// Where smooth scrolling puts the viewport for one update: the rows
+    /// held beyond it and how far the grid is drawn from where its rows
+    /// fall. See `resolveShift`.
+    pub const Shift = struct {
+        /// The first row held: the viewport's top-left, or the topmost row
+        /// revealed above it.
+        pin: PageList.Pin,
+        /// Rows held: the viewport's, plus any revealed above or below.
+        rows: size.CellCountInt,
+        /// How many of `rows` sit above the viewport.
+        rows_above: size.CellCountInt = 0,
+        /// How far below its row-aligned position the viewport's first row
+        /// is drawn, in pixels; negative is above. Zero when there is no
+        /// row to reveal on that side.
+        pixel_offset: f64 = 0,
+        /// The leftover height measured for this update (see `Geometry`).
+        pixel_pad: f64 = 0,
+    };
+
+    /// The smooth-scroll shift of `s`, decided exactly as an update draws
+    /// it. Anything that turns a pixel into a row or a row into a pixel
+    /// must use this rather than redo the arithmetic: the surface's hit
+    /// test did, without the checks below, and put the pointer a row off
+    /// wherever one of them drops the shift — at the bottom of scrollback
+    /// after a scroll gesture, before a pane has scrollback, and on the
+    /// alternate screen (macterm#433).
+    ///
+    /// Reads the screen's page list, so the caller must hold the lock that
+    /// guards it (the renderer state mutex).
+    pub fn resolveShift(s: *const Screen, geometry: Geometry) Shift {
+        // Smooth scrolling: honor a sub-row offset only as far as the rows
+        // it reveals exist, and widen our row range to include them. The
+        // gesture's remainder and the viewport's own leftover height both
+        // shift the grid down, so they add (see Geometry); a sum over a
+        // cell simply reveals more than one row.
+        const base_pin = s.pages.getTopLeft(.viewport);
+        var viewport_pin = base_pin;
+        var rows: size.CellCountInt = s.pages.rows;
+        var rows_above: size.CellCountInt = 0;
+
+        // The gesture's remainder is validated on its own, before the
+        // viewport's leftover height is added: a remainder pointing at a
+        // row that doesn't exist is dropped, and the leftover still shifts
+        // the grid. Validating the sum instead made a gesture pinned at the
+        // bottom of scrollback bob the content: its remainder cycles
+        // through (-cell, 0] as row after row fails to commit, so the sum
+        // crossed zero on every event and flipped the grid between sat on
+        // the leftover and not — a wiggle of up to the leftover's height.
+        const gesture: f64 = gesture: {
+            const raw = s.viewport_pixel_offset;
+            if (raw > 0 and base_pin.up(1) == null) break :gesture 0;
+            if (raw < 0) {
+                const below = if (s.pages.getBottomRight(.viewport)) |br|
+                    br.down(1)
+                else
+                    null;
+                if (below == null) break :gesture 0;
+            }
+            break :gesture raw;
+        };
+        // The viewport's leftover height, from the terminal's row count
+        // (see `Geometry`). Mid-resize it can reach a cell or more — the
+        // terminal still has the old rows while the renderer has the new
+        // height — and the sum then reveals a second row, which is what
+        // keeps the content where it was until the rows catch up. More
+        // rows than fit is no leftover at all.
+        const pixel_pad: f64 = pad: {
+            if (geometry.cell_height == 0) break :pad 0;
+            const laid_out = @as(u64, s.pages.rows) * geometry.cell_height;
+            if (geometry.terminal_height <= laid_out) break :pad 0;
+            break :pad @floatFromInt(geometry.terminal_height - laid_out);
+        };
+        var pixel_offset: f64 = gesture + pixel_pad;
+        if (pixel_offset > 0) {
+            // How many rows the offset spans. A gesture's own remainder is
+            // always under a cell, so with no cell height to measure
+            // against — every caller that passes no geometry — one row is
+            // the answer and nothing is capped.
+            const cell_height: f64 = @floatFromInt(geometry.cell_height);
+            const wanted: usize = if (geometry.cell_height > 0) @intFromFloat(@min(
+                @ceil(pixel_offset / cell_height),
+                @as(f64, @floatFromInt(s.pages.rows)),
+            )) else 1;
+            while (rows_above < wanted) {
+                const above = viewport_pin.up(1) orelse break;
+                viewport_pin = above;
+                rows += 1;
+                rows_above += 1;
+            }
+            if (rows_above == 0) {
+                // Nothing above to reveal: the grid stays where it is.
+                pixel_offset = 0;
+            } else if (geometry.cell_height > 0) {
+                // Scrollback ran out before the offset did: shift only as
+                // far as the rows we actually have, or the grid would be
+                // drawn off a strip nothing fills.
+                pixel_offset = @min(
+                    pixel_offset,
+                    @as(f64, @floatFromInt(rows_above)) * cell_height,
+                );
+            }
+        } else if (pixel_offset < 0) {
+            const below = if (s.pages.getBottomRight(.viewport)) |br|
+                br.down(1)
+            else
+                null;
+            if (below != null) rows += 1 else pixel_offset = 0;
+        }
+
+        return .{
+            .pin = viewport_pin,
+            .rows = rows,
+            .rows_above = rows_above,
+            .pixel_offset = pixel_offset,
+            .pixel_pad = pixel_pad,
+        };
     }
 
     /// Mark all render-state data as consumed by the renderer.
@@ -2723,4 +2771,82 @@ test "RenderState geometry pad sits the grid on the leftover height" {
     try state.update(alloc, &t);
     try testing.expectEqual(0, state.viewport_pixel_offset);
     try testing.expectEqual(0, state.rows_above);
+}
+
+test "RenderState resolveShift is the shift an update draws" {
+    // The surface hit-tests the pointer, reports mouse cells and places the
+    // IME with resolveShift (macterm#433). Wherever an update drops or caps
+    // the shift, so must it, or a click lands a row off what is drawn.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+
+    // Three 10px rows in 36px: a 6px leftover.
+    const geometry: RenderState.Geometry = .{ .cell_height = 10, .terminal_height = 36 };
+    const expectShift = struct {
+        fn expectShift(
+            rs: *RenderState,
+            term: *Terminal,
+            g: RenderState.Geometry,
+            want: f64,
+        ) !void {
+            const shift = RenderState.resolveShift(term.screens.active, g);
+            try rs.beginUpdate(std.testing.allocator, term, g);
+            rs.endUpdate();
+            try std.testing.expectEqual(want, shift.pixel_offset);
+            try std.testing.expectEqual(rs.viewport_pixel_offset, shift.pixel_offset);
+            try std.testing.expectEqual(rs.viewport_pixel_pad, shift.pixel_pad);
+            try std.testing.expectEqual(rs.rows_above, shift.rows_above);
+            try std.testing.expectEqual(rs.rows, shift.rows);
+        }
+    }.expectShift;
+
+    // No scrollback yet: nothing above to reveal, so the leftover stays
+    // padding and the grid is drawn where its rows fall.
+    s.nextSlice("1\r\n2");
+    try expectShift(&state, &t, geometry, 0);
+
+    // Once there is scrollback the grid sits on the leftover...
+    s.nextSlice("\r\n3\r\n4\r\n5");
+    try expectShift(&state, &t, geometry, 6);
+
+    // ...and stays there when a gesture pinned at the bottom leaves a
+    // remainder: nothing lies below to reveal, so the remainder is dropped.
+    t.screens.active.viewport_pixel_offset = -4;
+    try expectShift(&state, &t, geometry, 6);
+
+    // Scrolled into history there are rows on both sides; both count.
+    t.scrollViewport(.{ .delta = -1 });
+    t.screens.active.viewport_pixel_offset = -4;
+    try expectShift(&state, &t, geometry, 2);
+
+    // At the top of history nothing lies above: remainder and leftover
+    // both drop.
+    t.scrollViewport(.top);
+    t.screens.active.viewport_pixel_offset = 4;
+    try expectShift(&state, &t, geometry, 0);
+
+    // One row of scrollback above, asked for more than a row: capped at
+    // the row there is.
+    t.scrollViewport(.{ .delta = 1 });
+    t.screens.active.viewport_pixel_offset = 8;
+    try expectShift(&state, &t, geometry, 10);
+
+    // The alternate screen has no scrollback at all.
+    t.scrollViewport(.bottom);
+    s.nextSlice("\x1b[?1049h");
+    t.screens.active.viewport_pixel_offset = 4;
+    try expectShift(&state, &t, geometry, 0);
 }
