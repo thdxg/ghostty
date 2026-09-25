@@ -994,6 +994,159 @@ pub const RenderState = struct {
         };
     }
 
+    /// A rectangle of the screen whose content is drawn `offset` pixels
+    /// below where the terminal has it (negative: above): a region scroll
+    /// animation (see `Screen.region_scrolls`) partway through its ease, or
+    /// a region the terminal has scrolled since the frame on screen was
+    /// drawn. Rows and columns are inclusive, as in `Screen.RegionScroll`.
+    pub const RegionShift = struct {
+        top: size.CellCountInt,
+        bottom: size.CellCountInt,
+        left: size.CellCountInt,
+        right: size.CellCountInt,
+        offset: f64,
+
+        /// What `offset` becomes once the region's content scrolls
+        /// `scroll.lines` more rows: that many rows further from its place,
+        /// since what was drawn hasn't moved. Capped at the region's
+        /// height, past which none of the drawn content is left in it. The
+        /// renderer's region scroll animation accumulates with this too, so
+        /// the shift it draws and the one the surface undoes can't drift.
+        pub fn scrolledOffset(
+            offset: f64,
+            scroll: Screen.RegionScroll,
+            cell_height: f64,
+        ) f64 {
+            const rows: u32 = @as(u32, scroll.bottom - scroll.top) + 1;
+            const height: f64 = @as(f64, @floatFromInt(rows)) * cell_height;
+            return std.math.clamp(
+                offset + @as(f64, @floatFromInt(scroll.lines)) * cell_height,
+                -height,
+                height,
+            );
+        }
+
+        fn sameRegion(self: RegionShift, scroll: Screen.RegionScroll) bool {
+            return self.top == scroll.top and self.bottom == scroll.bottom and
+                self.left == scroll.left and self.right == scroll.right;
+        }
+    };
+
+    /// The regions a frame draws away from where the terminal has them, and
+    /// the screen and grid the frame was drawn for: on any other the
+    /// offsets describe content that isn't there. The renderer publishes one
+    /// for the frame on screen, and the surface undoes it to turn a pointer
+    /// into the row drawn under it (`contentY`) and a row into where it is
+    /// drawn (`offsetAt`) — the region scroll counterpart of `resolveShift`,
+    /// and like it the only place that arithmetic lives.
+    pub const RegionShifts = struct {
+        /// Every region the renderer animates at once, plus as many
+        /// regions as the terminal records scrolls of between frames.
+        pub const capacity = Screen.RegionScrolls.capacity;
+
+        items: [capacity]RegionShift = undefined,
+        len: u8 = 0,
+
+        /// The screen and grid size the frame was drawn for. The default
+        /// matches no terminal, so nothing is undone before a frame is.
+        screen: ScreenSet.Key = .primary,
+        cols: size.CellCountInt = 0,
+        rows: size.CellCountInt = 0,
+
+        pub fn slice(self: *const RegionShifts) []const RegionShift {
+            return self.items[0..self.len];
+        }
+
+        /// Whether these offsets are about what `t` shows now. A screen
+        /// switch or a resize since the frame was drawn leaves its regions
+        /// describing content that is gone; the renderer drops their
+        /// animations on its next update.
+        pub fn describes(self: *const RegionShifts, t: *const Terminal) bool {
+            return self.screen == t.screens.active_key and
+                self.cols == t.cols and
+                self.rows == t.rows;
+        }
+
+        /// Add a region. Past capacity it is dropped: a region the hit
+        /// test doesn't know about is resolved as if drawn in place.
+        pub fn append(self: *RegionShifts, shift: RegionShift) void {
+            if (self.len == capacity) return;
+            self.items[self.len] = shift;
+            self.len += 1;
+        }
+
+        /// The terminal scrolled a region after these offsets were drawn.
+        /// What is on screen didn't move, so its content now sits that many
+        /// rows further from where the terminal has it — a region that was
+        /// drawn in place included.
+        pub fn addScroll(
+            self: *RegionShifts,
+            scroll: Screen.RegionScroll,
+            cell_height: f64,
+        ) void {
+            for (self.items[0..self.len]) |*shift| {
+                if (!shift.sameRegion(scroll)) continue;
+                shift.offset = RegionShift.scrolledOffset(shift.offset, scroll, cell_height);
+                return;
+            }
+            self.append(.{
+                .top = scroll.top,
+                .bottom = scroll.bottom,
+                .left = scroll.left,
+                .right = scroll.right,
+                .offset = RegionShift.scrolledOffset(0, scroll, cell_height),
+            });
+        }
+
+        /// Where the terminal has the content drawn at (`x`, `y`), a point
+        /// on the grid in pixels: the y it belongs at. Inside a region that
+        /// is drawn shifted that is `y` less the region's offset, the region
+        /// being decided by where the point is drawn, as the shaders do.
+        /// Content the region has scrolled out of (a ghost row sliding out,
+        /// or the gap one leaves) is no longer in the terminal, so it
+        /// resolves to the region's nearest edge row. Anywhere else, `y`.
+        pub fn contentY(
+            self: *const RegionShifts,
+            x: f64,
+            y: f64,
+            cell_width: f64,
+            cell_height: f64,
+        ) f64 {
+            for (self.slice()) |shift| {
+                const left: f64 = @as(f64, @floatFromInt(shift.left)) * cell_width;
+                const right: f64 = @as(f64, @floatFromInt(@as(u32, shift.right) + 1)) * cell_width;
+                const top: f64 = @as(f64, @floatFromInt(shift.top)) * cell_height;
+                const bottom: f64 = @as(f64, @floatFromInt(@as(u32, shift.bottom) + 1)) * cell_height;
+                if (x < left or x >= right or y < top or y >= bottom) continue;
+
+                const content = y - shift.offset;
+                if (content < top) return top;
+                if (content >= bottom) return bottom - 1;
+                return content;
+            }
+
+            return y;
+        }
+
+        /// How far below its place the cell at (`x`, `y`) is drawn, in
+        /// pixels: the offset of the region it belongs to, whose content
+        /// is shifted with it (the shaders decide by the cell's own
+        /// position), or zero.
+        pub fn offsetAt(
+            self: *const RegionShifts,
+            x: size.CellCountInt,
+            y: size.CellCountInt,
+        ) f64 {
+            for (self.slice()) |shift| {
+                if (x < shift.left or x > shift.right or
+                    y < shift.top or y > shift.bottom) continue;
+                return shift.offset;
+            }
+
+            return 0;
+        }
+    };
+
     /// Mark all render-state data as consumed by the renderer.
     ///
     /// This clears both the global dirty state and every per-row dirty flag.
@@ -2849,4 +3002,209 @@ test "RenderState resolveShift is the shift an update draws" {
     s.nextSlice("\x1b[?1049h");
     t.screens.active.viewport_pixel_offset = 4;
     try expectShift(&state, &t, geometry, 0);
+}
+
+test "RenderState RegionShifts resolves a point to the row drawn there" {
+    const testing = std.testing;
+    const contentY = struct {
+        fn contentY(shifts: *const RenderState.RegionShifts, x: f64, y: f64) f64 {
+            return shifts.contentY(x, y, 10, 20);
+        }
+    }.contentY;
+
+    // Rows 2..9 and columns 1..8 of a grid of 10x20px cells, drawn 25px
+    // below where the terminal has them: most of the way home from a scroll
+    // of two rows up.
+    var shifts: RenderState.RegionShifts = .{};
+    shifts.append(.{ .top = 2, .bottom = 9, .left = 1, .right = 8, .offset = 25 });
+
+    // Nothing outside the region moves: above it, below it, and in the
+    // margins either side of it.
+    try testing.expectEqual(30, contentY(&shifts, 15, 30));
+    try testing.expectEqual(205, contentY(&shifts, 15, 205));
+    try testing.expectEqual(100, contentY(&shifts, 5, 100));
+    try testing.expectEqual(100, contentY(&shifts, 95, 100));
+
+    // Inside it, the content drawn at a point is 25px higher in the
+    // terminal.
+    try testing.expectEqual(75, contentY(&shifts, 15, 100));
+    try testing.expectEqual(174, contentY(&shifts, 85, 199));
+
+    // Its top 25px show rows that have scrolled out of the terminal, which
+    // resolve to the region's top row.
+    try testing.expectEqual(40, contentY(&shifts, 15, 40));
+    try testing.expectEqual(40, contentY(&shifts, 15, 64));
+    try testing.expectEqual(40, contentY(&shifts, 15, 65));
+
+    // Scrolled down, the content is drawn above its place and the rows
+    // that left are at the bottom: they resolve to the bottom row.
+    shifts.items[0].offset = -30;
+    try testing.expectEqual(180, contentY(&shifts, 15, 150));
+    try testing.expectEqual(199, contentY(&shifts, 15, 170));
+    try testing.expectEqual(199, contentY(&shifts, 15, 199));
+
+    // The first region a point is drawn in decides, as in the shaders.
+    shifts.append(.{ .top = 0, .bottom = 9, .left = 0, .right = 9, .offset = 7 });
+    try testing.expectEqual(180, contentY(&shifts, 15, 150));
+    try testing.expectEqual(143, contentY(&shifts, 5, 150));
+}
+
+test "RenderState RegionShifts offsetAt is where a cell is drawn" {
+    const testing = std.testing;
+
+    var shifts: RenderState.RegionShifts = .{};
+    try testing.expectEqual(0, shifts.offsetAt(3, 3));
+
+    shifts.append(.{ .top = 2, .bottom = 9, .left = 1, .right = 8, .offset = 25 });
+    try testing.expectEqual(25, shifts.offsetAt(1, 2));
+    try testing.expectEqual(25, shifts.offsetAt(8, 9));
+    try testing.expectEqual(0, shifts.offsetAt(0, 5));
+    try testing.expectEqual(0, shifts.offsetAt(9, 5));
+    try testing.expectEqual(0, shifts.offsetAt(4, 1));
+    try testing.expectEqual(0, shifts.offsetAt(4, 10));
+}
+
+test "RenderState RegionShifts addScroll moves the terminal's rows off the frame's" {
+    const testing = std.testing;
+
+    // Rows 2..9: eight 20px rows, 160px.
+    const up: Screen.RegionScroll = .{ .top = 2, .bottom = 9, .left = 0, .right = 9, .lines = 3 };
+    var down = up;
+    down.lines = -1;
+
+    // The renderer's animation and the hit test accumulate alike.
+    try testing.expectEqual(60, RenderState.RegionShift.scrolledOffset(0, up, 20));
+    try testing.expectEqual(-150, RenderState.RegionShift.scrolledOffset(-130, down, 20));
+    try testing.expectEqual(-160, RenderState.RegionShift.scrolledOffset(-150, down, 20));
+
+    // A region the frame drew in place: its content is now three rows
+    // below where the terminal has it.
+    var shifts: RenderState.RegionShifts = .{};
+    shifts.addScroll(up, 20);
+    try testing.expectEqual(1, shifts.len);
+    try testing.expectEqual(60, shifts.items[0].offset);
+
+    // More scrolling adds to it, and a scroll the other way takes it back.
+    shifts.addScroll(up, 20);
+    try testing.expectEqual(120, shifts.items[0].offset);
+    shifts.addScroll(down, 20);
+    try testing.expectEqual(100, shifts.items[0].offset);
+
+    // Past the region's height none of the drawn content is left in it.
+    shifts.addScroll(up, 20);
+    shifts.addScroll(up, 20);
+    try testing.expectEqual(1, shifts.len);
+    try testing.expectEqual(160, shifts.items[0].offset);
+
+    // Another region is an entry of its own, while there is room.
+    var other = up;
+    for (1..RenderState.RegionShifts.capacity) |i| {
+        other.left = @intCast(i);
+        shifts.addScroll(other, 20);
+    }
+    try testing.expectEqual(RenderState.RegionShifts.capacity, shifts.len);
+    other.left = 0;
+    other.right = 4;
+    shifts.addScroll(other, 20);
+    try testing.expectEqual(RenderState.RegionShifts.capacity, shifts.len);
+}
+
+test "RenderState RegionShifts land a click on the row that shows what is drawn" {
+    // A region scroll animation draws a region's content away from where
+    // the terminal has it, and the program may scroll it further before
+    // the next frame is on screen. Whatever the pointer is over, the row a
+    // click resolves to must hold that, or be the region's edge row when
+    // what is drawn there has scrolled out of the terminal.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const cell_h = 20;
+
+    var t = try Terminal.init(io, alloc, .{ .cols = 10, .rows = 8 });
+    defer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // The label of a row of `state` ('0'..'7'), or 0 for a blank row.
+    const label = struct {
+        fn label(state: *const RenderState, row: usize) u21 {
+            const cells = state.row_data.slice().items(.cells);
+            return cells[row].get(1).raw.codepoint();
+        }
+    }.label;
+
+    // A click at every pixel row of a frame of `drawn` that shows region
+    // rows 1..6 `offset` low, against `now`, which has scrolled the region
+    // up `since` more rows: it lands on the row with the label drawn under
+    // it, or on an edge row where what is drawn is no longer in the region
+    // (a row the frame shows sliding out, or one scrolled out since).
+    const expectClicks = struct {
+        fn expectClicks(
+            drawn: *const RenderState,
+            offset: f64,
+            now: *const RenderState,
+            since: usize,
+            shifts: *const RenderState.RegionShifts,
+        ) !void {
+            const top = 1;
+            const bottom = 6;
+            for (0..8 * cell_h) |y| {
+                const at = shifts.contentY(5, @floatFromInt(y), 10, cell_h);
+                const row: usize = @intFromFloat(@floor(at / cell_h));
+
+                if (y < top * cell_h or y >= (bottom + 1) * cell_h) {
+                    try std.testing.expectEqual(label(drawn, y / cell_h), label(now, row));
+                    continue;
+                }
+
+                const content = @as(f64, @floatFromInt(y)) - offset;
+                const drawn_row: usize = if (content < 0) 0 else @intFromFloat(@floor(content / cell_h));
+                if (content < top * cell_h or drawn_row > bottom or drawn_row < top + since) {
+                    try std.testing.expect(row == top or row == bottom);
+                    continue;
+                }
+                try std.testing.expectEqual(drawn_row - since, row);
+                try std.testing.expectEqual(label(drawn, drawn_row), label(now, row));
+            }
+        }
+    }.expectClicks;
+
+    // The alternate screen, one labelled row per line.
+    s.nextSlice("\x1b[?1049h\x1b[H");
+    s.nextSlice("r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\r\nr7");
+    var before: RenderState = .empty;
+    defer before.deinit(alloc);
+    try before.update(alloc, &t);
+
+    // The frame on screen draws every row in place. The program scrolls
+    // rows 1..6 up by two, as helix scrolls a view, and the renderer hasn't
+    // taken the scroll in yet: the surface folds in what is pending.
+    s.nextSlice("\x1b[2;7r\x1b[2S");
+    try testing.expectEqual(1, t.screens.active.region_scrolls.len);
+    var shifts: RenderState.RegionShifts = .{ .screen = .alternate, .cols = 10, .rows = 8 };
+    try testing.expect(shifts.describes(&t));
+    for (t.screens.active.region_scrolls.slice()) |scroll| shifts.addScroll(scroll, cell_h);
+    var mid: RenderState = .empty;
+    defer mid.deinit(alloc);
+    try mid.update(alloc, &t);
+    try expectClicks(&before, 0, &mid, 2, &shifts);
+
+    // Taken in, the scroll is eased home: a frame drawn 13px from home
+    // shows the scrolled content 13px low, and that is what is published.
+    t.screens.active.region_scrolls.clear();
+    shifts = .{ .screen = .alternate, .cols = 10, .rows = 8 };
+    shifts.append(.{ .top = 1, .bottom = 6, .left = 0, .right = 9, .offset = 13 });
+    try expectClicks(&mid, 13, &mid, 0, &shifts);
+
+    // Momentum: another row scrolls while that frame is on screen.
+    s.nextSlice("\x1b[S");
+    for (t.screens.active.region_scrolls.slice()) |scroll| shifts.addScroll(scroll, cell_h);
+    var after: RenderState = .empty;
+    defer after.deinit(alloc);
+    try after.update(alloc, &t);
+    try expectClicks(&mid, 13, &after, 1, &shifts);
+
+    // Leaving the alternate screen leaves nothing they describe.
+    s.nextSlice("\x1b[?1049l");
+    try testing.expect(!shifts.describes(&t));
 }

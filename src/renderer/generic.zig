@@ -45,6 +45,98 @@ const DisplayLink = switch (builtin.os.tag) {
 
 const log = std.log.scoped(.generic_renderer);
 
+/// Where the frame on screen draws each animating region, for the surface
+/// to undo when it turns a pointer into a row: the offsets each frame in
+/// the swap chain was drawn with, and those of the frame presented last,
+/// each with the region scrolls the terminal has done since the frame was
+/// drawn folded in — they moved the terminal's rows, not the frame's.
+///
+/// A frame's offsets apply once it is on screen, not when it is drawn:
+/// until the GPU has finished it the previous frame is what is shown, and
+/// at the start of an ease one frame moves a region most of a row. Where
+/// the graphics API can say which target it is showing (`shownTarget`),
+/// that decides; otherwise the frame it last reported presented
+/// (`framePresented`) does. An API that does neither (OpenGL, today)
+/// publishes nothing, and its hit tests don't undo region offsets.
+///
+/// Guarded by its own mutex rather than the renderer state mutex, which
+/// drawFrame can't take: it holds `draw_mutex` and runs on the main thread
+/// too, while updateFrame takes the state mutex and then `draw_mutex`. This
+/// one is taken last everywhere (inside `draw_mutex` by drawFrame, inside
+/// the state mutex by updateFrame and the surface) and nothing is taken
+/// while it is held, so it can't be part of a deadlock.
+fn PresentedRegions(comptime slots: usize) type {
+    return struct {
+        const Self = @This();
+        const RegionShifts = terminal.RenderState.RegionShifts;
+
+        mutex: std.Io.Mutex = .init,
+        presented: RegionShifts = .{},
+        frames: [slots]Frame = @splat(.{}),
+
+        const Frame = struct {
+            /// The target it was drawn to, as the graphics API names it
+            /// (`targetIdentity`), or 0 where the API can't say.
+            target: usize = 0,
+            shifts: RegionShifts = .{},
+        };
+
+        /// A frame was drawn to `target` in swap chain slot `slot` with
+        /// these offsets.
+        pub fn drew(self: *Self, io: std.Io, slot: usize, target: usize, shifts: RegionShifts) void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            // A rebuilt swap chain can reuse a released target's name; only
+            // the frame drawn last answers to it.
+            if (target != 0) for (&self.frames) |*frame| {
+                if (frame.target == target) frame.target = 0;
+            };
+            self.frames[slot] = .{ .target = target, .shifts = shifts };
+        }
+
+        /// The terminal scrolled these regions after every frame drawn so
+        /// far, the one on screen included.
+        pub fn scrolled(
+            self: *Self,
+            io: std.Io,
+            scrolls: []const terminal.Screen.RegionScroll,
+            cell_height: f64,
+        ) void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            for (scrolls) |scroll| {
+                self.presented.addScroll(scroll, cell_height);
+                for (&self.frames) |*frame| frame.shifts.addScroll(scroll, cell_height);
+            }
+        }
+
+        /// The frame last drawn into `slot` has been presented.
+        pub fn present(self: *Self, io: std.Io, slot: usize) void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.presented = self.frames[slot].shifts;
+        }
+
+        /// The offsets of the frame on screen: the one drawn to `shown`,
+        /// the target the graphics API says it is showing, when that is
+        /// known, and otherwise the frame presented last.
+        ///
+        /// On macOS the layer's contents change on the main thread while a
+        /// frame is presented from the GPU's completion thread, so the
+        /// frame presented last can be a frame ahead of the one a
+        /// main-thread hit test sees, or a frame behind; the layer itself
+        /// never is.
+        pub fn get(self: *Self, io: std.Io, shown: usize) RegionShifts {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (shown != 0) for (self.frames) |frame| {
+                if (frame.target == shown) return frame.shifts;
+            };
+            return self.presented;
+        }
+    };
+}
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -180,6 +272,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pending_region_scrolls: std.ArrayListUnmanaged(terminal.Screen.RegionScroll) = .empty,
         region_anim_tick: ?std.Io.Timestamp = null,
         region_anim_screen: ?terminal.ScreenSet.Key = null,
+
+        /// The region scroll animations of the frame on screen, for the
+        /// surface to undo when it turns a pointer into a row (see
+        /// `regionShifts`).
+        presented_regions: PresentedRegions(SwapChain.buf_count) = .{},
 
         /// What is uploaded to the GPU while ghost rows exist: the live
         /// background cells followed by one row per ghost, and the ghost
@@ -1135,6 +1232,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         };
 
+        comptime {
+            if (shaderpkg.Uniforms.max_region_anims > terminal.RenderState.RegionShifts.capacity)
+                @compileError("a frame's region animations must fit in what it publishes");
+        }
+
         /// How long a region scroll takes to close 63% of its remaining
         /// distance. A half-page jump lands in about a quarter second,
         /// most of it in the first hundred milliseconds.
@@ -1270,11 +1372,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // The new content is drawn where the old was: `lines` rows
                 // away. Beyond the region's height nothing of the old
                 // content is left to slide, so the shift is capped there.
-                const height_px: f64 = @as(f64, @floatFromInt(@as(u32, scroll.bottom - scroll.top) + 1)) * cell_h;
-                anim.shift = std.math.clamp(
-                    anim.shift + @as(f64, @floatFromInt(scroll.lines)) * cell_h,
-                    -height_px,
-                    height_px,
+                // The surface's hit test accumulates with the same rule.
+                anim.shift = terminal.RenderState.RegionShift.scrolledOffset(
+                    anim.shift,
+                    scroll,
+                    cell_h,
                 );
                 for (anim.ghosts.items) |*ghost| ghost.final_row -= scroll.lines;
 
@@ -1435,6 +1537,79 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             self.uniforms.anim_counts = .{ @intCast(self.region_anims.items.len), @intCast(ghost_count), 0, 0 };
             self.cells_rebuilt = true;
+        }
+
+        /// The region offsets the uniforms hand the shaders, as the surface
+        /// undoes them: read back from the uniforms, so what is published
+        /// is exactly what the frame is drawn with. Caller must hold the
+        /// draw mutex.
+        fn drawnRegionShifts(self: *const Self) terminal.RenderState.RegionShifts {
+            var shifts: terminal.RenderState.RegionShifts = .{
+                .screen = self.region_anim_screen orelse .primary,
+                .cols = self.cells.size.columns,
+                .rows = self.cells.size.rows,
+            };
+            for (self.region_anims.items, 0..) |*anim, i| shifts.append(.{
+                .top = anim.region.top,
+                .bottom = anim.region.bottom,
+                .left = anim.region.left,
+                .right = anim.region.right,
+                .offset = self.uniforms.region_shift[i][0],
+            });
+            return shifts;
+        }
+
+        /// The terminal scrolled these regions: every frame drawn so far,
+        /// the one on screen included, now shows their content that much
+        /// further from where the terminal has it. Folded into the
+        /// published offsets at once rather than when a frame showing the
+        /// scroll is presented, because until then a click resolves
+        /// against the terminal's rows, which have already moved.
+        ///
+        /// Called with the renderer state mutex held, so no scroll is ever
+        /// in neither place the surface looks: here, or still pending on
+        /// the screen.
+        fn regionsScrolled(
+            self: *Self,
+            scrolls: []const terminal.Screen.RegionScroll,
+        ) void {
+            if (scrolls.len == 0) return;
+            self.presented_regions.scrolled(
+                global.io(),
+                scrolls,
+                @floatFromInt(self.grid_metrics.cell_height),
+            );
+        }
+
+        /// Where the frame on screen draws each region it draws away from
+        /// where the terminal has it, and how far, with the region scrolls
+        /// this renderer has taken in since folded in. The surface adds the
+        /// ones still pending on the screen and undoes the result to turn a
+        /// pointer into the row drawn under it.
+        ///
+        /// Exact for the thread the layer's contents change on (the main
+        /// thread on macOS, where the hit tests run). Takes only the lock
+        /// guarding the offsets (see `PresentedRegions`), so it is safe
+        /// under any other.
+        pub fn regionShifts(self: *Self) terminal.RenderState.RegionShifts {
+            const shown: usize = if (@hasDecl(GraphicsAPI, "shownTarget"))
+                self.api.shownTarget()
+            else
+                0;
+            return self.presented_regions.get(global.io(), shown);
+        }
+
+        /// Called by the graphics API once it has presented the frame drawn
+        /// to `target`. Where it can't say which target it is showing, the
+        /// hit test undoes this frame's region offsets from here on.
+        pub fn framePresented(self: *Self, target: *const Target) void {
+            // The swap chain outlives every frame in flight: it is only
+            // torn down after they have all completed.
+            const swap_chain = if (self.swap_chain) |*sc| sc else return;
+            const slot = for (&swap_chain.frames, 0..) |*frame, i| {
+                if (&frame.target == target) break i;
+            } else return;
+            self.presented_regions.present(global.io(), slot);
         }
 
         /// True if our renderer is using vsync. If true, the renderer or apprt
@@ -1711,13 +1886,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Region scrolls since the last frame, to animate. They
                 // are applied in rebuildCells, which still has the previous
-                // frame's cells to make ghost rows from.
+                // frame's cells to make ghost rows from. The hit test has
+                // to know about them now: the terminal's rows have moved,
+                // and what is on screen hasn't.
                 {
                     const scrolls = &state.terminal.screens.active.region_scrolls;
                     if (self.config.smooth_scroll) {
                         for (scrolls.slice()) |scroll| {
                             self.pending_region_scrolls.append(self.alloc, scroll) catch break;
                         }
+                        self.regionsScrolled(scrolls.slice());
                     }
                     scrolls.clear();
                 }
@@ -2199,6 +2377,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Get a frame context from the graphics API.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
             defer frame_ctx.complete(sync);
+
+            // What the hit test undoes once this frame is on screen.
+            self.presented_regions.drew(
+                global.io(),
+                swap_chain.frame_index,
+                if (@hasDecl(GraphicsAPI, "targetIdentity"))
+                    GraphicsAPI.targetIdentity(&frame.target)
+                else
+                    0,
+                self.drawnRegionShifts(),
+            );
 
             {
                 var pass = frame_ctx.renderPass(&.{.{
@@ -4054,4 +4243,68 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+test "PresentedRegions answers with the offsets of the frame on screen" {
+    const testing = std.testing;
+    const io = testing.io;
+    const RegionShifts = terminal.RenderState.RegionShifts;
+
+    var regions: PresentedRegions(3) = .{};
+    const at = struct {
+        fn at(offset: f64) RegionShifts {
+            var shifts: RegionShifts = .{ .screen = .alternate, .cols = 10, .rows = 8 };
+            shifts.append(.{ .top = 1, .bottom = 6, .left = 0, .right = 9, .offset = offset });
+            return shifts;
+        }
+    }.at;
+    const offset = struct {
+        fn offset(r: *PresentedRegions(3), shown: usize) f64 {
+            const shifts = r.get(testing.io, shown);
+            return if (shifts.len == 0) 0 else shifts.items[0].offset;
+        }
+    }.offset;
+
+    // Drawn is not shown: until the frame is presented, the one before it
+    // is on screen.
+    regions.drew(io, 0, 100, at(30));
+    try testing.expectEqual(0, offset(&regions, 0));
+    regions.present(io, 0);
+    try testing.expectEqual(30, offset(&regions, 0));
+    try testing.expectEqual(30, offset(&regions, 100));
+
+    // The next frame, drawn 10px further into the ease, is presented, but
+    // the layer is still showing the first: the layer decides.
+    regions.drew(io, 1, 101, at(20));
+    regions.present(io, 1);
+    try testing.expectEqual(30, offset(&regions, 100));
+    try testing.expectEqual(20, offset(&regions, 101));
+    try testing.expectEqual(20, offset(&regions, 0));
+
+    // The program scrolls two more 20px rows: every frame drawn so far
+    // shows the content 40px further from the terminal's rows.
+    regions.scrolled(io, &.{.{ .top = 1, .bottom = 6, .left = 0, .right = 9, .lines = 2 }}, 20);
+    try testing.expectEqual(70, offset(&regions, 100));
+    try testing.expectEqual(60, offset(&regions, 101));
+    try testing.expectEqual(60, offset(&regions, 0));
+
+    // A frame drawn after the scroll drew it in already.
+    regions.drew(io, 2, 102, at(45));
+    regions.present(io, 2);
+    try testing.expectEqual(45, offset(&regions, 102));
+
+    // A rebuilt swap chain reuses a target's name: the frame drawn to it
+    // last is the one that answers.
+    regions.drew(io, 1, 100, at(12));
+    try testing.expectEqual(12, offset(&regions, 100));
+
+    // A target the layer shows that no frame here was drawn to (one from a
+    // released swap chain) falls back to the frame presented last.
+    try testing.expectEqual(45, offset(&regions, 999));
+
+    // Once the animation has settled there is nothing to undo.
+    regions.drew(io, 0, 103, .{ .screen = .alternate, .cols = 10, .rows = 8 });
+    regions.present(io, 0);
+    try testing.expectEqual(0, offset(&regions, 103));
+    try testing.expectEqual(0, offset(&regions, 0));
 }
