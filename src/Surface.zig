@@ -1203,12 +1203,12 @@ fn selectionScrollTick(self: *Surface) !void {
     }
 
     const pos = try self.rt_surface.getCursorPos();
-    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // We need our locked state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     const t: *terminal.Terminal = self.renderer_state.terminal;
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
         .viewport = pos_vp,
@@ -2145,6 +2145,8 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
     self.renderer_state.mutex.lockUncancelable(global.io());
     const cursor = self.renderer_state.terminal.screens.active.cursor;
     const preedit_width: usize = if (self.renderer_state.preedit) |preedit| preedit.width() else 0;
+    // Smooth scrolling draws the grid, and the cursor with it, shifted.
+    const shift = self.viewportPixelShift();
     self.renderer_state.mutex.unlock(global.io());
 
     // TODO: need to handle when scrolling and the cursor is not
@@ -2172,6 +2174,9 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
 
         // We want the bottom
         y += @floatFromInt(self.size.cell.height);
+
+        // Of the row as it is drawn
+        y += shift;
 
         // And scale it
         y /= content_scale.y;
@@ -3792,7 +3797,7 @@ fn mouseReport(
         .mods = mods,
         .pos = .{
             .x = pos.x,
-            .y = pos.y,
+            .y = self.mouseReportY(pos.y),
         },
     }, encoding_opts) catch |err| switch (err) {
         error.WriteFailed => {
@@ -4644,9 +4649,6 @@ pub fn cursorPosCallback(
     // Update our modifiers if they changed
     if (mods) |v| self.modsChanged(v);
 
-    // The mouse position in the viewport
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We always reset the over link status because it will be reprocessed
     // below. But we need the old value to know if we need to undo mouse
     // shape changes.
@@ -4656,6 +4658,9 @@ pub fn cursorPosCallback(
     // We are reading/writing state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+
+    // The mouse position in the viewport
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // Update our mouse state. We set this to null initially because we only
     // want to set it when we're not selecting or doing any other mouse
@@ -4810,6 +4815,9 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
 }
 
+/// The viewport cell under a surface position.
+///
+/// Precondition: the render_state mutex must be held.
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Smooth scrolling draws the viewport shifted by a sub-row offset;
     // undo it so the hit-tested cell is the one under the pointer.
@@ -4821,24 +4829,42 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
     return .{ .x = grid.x, .y = grid.y };
 }
 
-/// How far down the renderer is drawing the viewport, in pixels: the
-/// remainder of a scroll gesture plus the height the viewport's rows don't
-/// account for, which under `smooth-scroll` the grid sits on rather than
-/// leaving as padding (see `terminal.RenderState.Geometry`).
+/// How far below its row-aligned position the renderer draws the
+/// viewport's first row, in pixels: the remainder of a scroll gesture plus
+/// the height the viewport's rows don't account for, which under
+/// `smooth-scroll` the grid sits on rather than leaving as padding.
 ///
-/// This mirrors what the renderer resolves rather than reading it back: the
-/// renderer drops a shift it has no row to reveal (the top of scrollback),
-/// and this doesn't know that, so a click there can land a row off. The
-/// alternative is a lock and a round trip per mouse move.
-fn viewportPixelShift(self: Surface) f64 {
-    const gesture: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
-    if (!self.config.smooth_scroll) return gesture;
-    const cell_height = self.size.cell.height;
-    if (cell_height == 0) return gesture;
-    const laid_out = @as(u32, self.size.grid().rows) * cell_height;
-    const height = self.size.terminal().height;
-    if (height <= laid_out) return gesture;
-    return gesture + @as(f64, @floatFromInt(height - laid_out));
+/// Resolved by the function the render state draws with
+/// (`terminal.RenderState.resolveShift`), against the geometry the
+/// renderer hands it (`viewportGeometry` in renderer/generic.zig) — never
+/// re-derived here. The render state drops a shift it has no row to
+/// reveal, and an earlier copy of the arithmetic here, which kept it, put
+/// the pointer a row off in exactly those places (macterm#433).
+///
+/// Precondition: the render_state mutex must be held.
+fn viewportPixelShift(self: *const Surface) f64 {
+    const geometry: terminal.RenderState.Geometry = if (self.config.smooth_scroll) .{
+        .cell_height = self.size.cell.height,
+        .terminal_height = self.size.terminal().height,
+    } else .none;
+    return terminal.RenderState.resolveShift(
+        self.io.terminal.screens.active,
+        geometry,
+    ).pixel_offset;
+}
+
+/// The pointer's y for a mouse report: where it falls on the grid as drawn
+/// (see `viewportPixelShift`), so a program is told the cell the user
+/// clicked. A pointer outside the surface is left alone and one inside is
+/// kept inside, so whether an event happened outside the viewport is still
+/// decided by where the pointer really is.
+///
+/// Precondition: the render_state mutex must be held.
+fn mouseReportY(self: *const Surface, ypos: f32) f32 {
+    const height: f32 = @floatFromInt(self.size.screen.height);
+    if (ypos < 0 or ypos > height) return ypos;
+    const shift: f32 = @floatCast(self.viewportPixelShift());
+    return std.math.clamp(ypos - shift, 0, height);
 }
 
 /// Scroll to the bottom of the viewport.

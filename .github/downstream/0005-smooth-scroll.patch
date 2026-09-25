@@ -1,5 +1,5 @@
 diff --git a/src/Surface.zig b/src/Surface.zig
-index 6505eeefb..4e6cdf1d6 100644
+index 6505eeefb..b9ec3bce3 100644
 --- a/src/Surface.zig
 +++ b/src/Surface.zig
 @@ -317,6 +317,7 @@ const DerivedConfig = struct {
@@ -18,7 +18,40 @@ index 6505eeefb..4e6cdf1d6 100644
              .fullscreen = config.fullscreen,
              .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
              .macos_option_as_alt = config.@"macos-option-as-alt",
-@@ -3562,14 +3564,18 @@ pub fn scrollCallback(
+@@ -1201,12 +1203,12 @@ fn selectionScrollTick(self: *Surface) !void {
+     }
+ 
+     const pos = try self.rt_surface.getCursorPos();
+-    const pos_vp = self.posToViewport(pos.x, pos.y);
+ 
+     // We need our locked state for the remainder
+     self.renderer_state.mutex.lockUncancelable(global.io());
+     defer self.renderer_state.mutex.unlock(global.io());
+     const t: *terminal.Terminal = self.renderer_state.terminal;
++    const pos_vp = self.posToViewport(pos.x, pos.y);
+ 
+     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
+         .viewport = pos_vp,
+@@ -2143,6 +2145,8 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
+     self.renderer_state.mutex.lockUncancelable(global.io());
+     const cursor = self.renderer_state.terminal.screens.active.cursor;
+     const preedit_width: usize = if (self.renderer_state.preedit) |preedit| preedit.width() else 0;
++    // Smooth scrolling draws the grid, and the cursor with it, shifted.
++    const shift = self.viewportPixelShift();
+     self.renderer_state.mutex.unlock(global.io());
+ 
+     // TODO: need to handle when scrolling and the cursor is not
+@@ -2171,6 +2175,9 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
+         // We want the bottom
+         y += @floatFromInt(self.size.cell.height);
+ 
++        // Of the row as it is drawn
++        y += shift;
++
+         // And scale it
+         y /= content_scale.y;
+ 
+@@ -3562,14 +3569,18 @@ pub fn scrollCallback(
              break :y .{};
          }
  
@@ -39,7 +72,7 @@ index 6505eeefb..4e6cdf1d6 100644
  
          break :y .{ .delta = delta };
      };
-@@ -3676,6 +3682,18 @@ pub fn scrollCallback(
+@@ -3676,6 +3687,18 @@ pub fn scrollCallback(
              // is negative down but our viewport is positive down.
              self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
          }
@@ -58,9 +91,42 @@ index 6505eeefb..4e6cdf1d6 100644
      }
  
      try self.queueRender();
-@@ -4793,12 +4811,36 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+@@ -3774,7 +3797,7 @@ fn mouseReport(
+         .mods = mods,
+         .pos = .{
+             .x = pos.x,
+-            .y = pos.y,
++            .y = self.mouseReportY(pos.y),
+         },
+     }, encoding_opts) catch |err| switch (err) {
+         error.WriteFailed => {
+@@ -4626,9 +4649,6 @@ pub fn cursorPosCallback(
+     // Update our modifiers if they changed
+     if (mods) |v| self.modsChanged(v);
+ 
+-    // The mouse position in the viewport
+-    const pos_vp = self.posToViewport(pos.x, pos.y);
+-
+     // We always reset the over link status because it will be reprocessed
+     // below. But we need the old value to know if we need to undo mouse
+     // shape changes.
+@@ -4639,6 +4659,9 @@ pub fn cursorPosCallback(
+     self.renderer_state.mutex.lockUncancelable(global.io());
+     defer self.renderer_state.mutex.unlock(global.io());
+ 
++    // The mouse position in the viewport
++    const pos_vp = self.posToViewport(pos.x, pos.y);
++
+     // Update our mouse state. We set this to null initially because we only
+     // want to set it when we're not selecting or doing any other mouse
+     // event.
+@@ -4792,13 +4815,58 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
  }
  
++/// The viewport cell under a surface position.
++///
++/// Precondition: the render_state mutex must be held.
  pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
 +    // Smooth scrolling draws the viewport shifted by a sub-row offset;
 +    // undo it so the hit-tested cell is the one under the pointer.
@@ -73,24 +139,42 @@ index 6505eeefb..4e6cdf1d6 100644
      return .{ .x = grid.x, .y = grid.y };
  }
  
-+/// How far down the renderer is drawing the viewport, in pixels: the
-+/// remainder of a scroll gesture plus the height the viewport's rows don't
-+/// account for, which under `smooth-scroll` the grid sits on rather than
-+/// leaving as padding (see `terminal.RenderState.Geometry`).
++/// How far below its row-aligned position the renderer draws the
++/// viewport's first row, in pixels: the remainder of a scroll gesture plus
++/// the height the viewport's rows don't account for, which under
++/// `smooth-scroll` the grid sits on rather than leaving as padding.
 +///
-+/// This mirrors what the renderer resolves rather than reading it back: the
-+/// renderer drops a shift it has no row to reveal (the top of scrollback),
-+/// and this doesn't know that, so a click there can land a row off. The
-+/// alternative is a lock and a round trip per mouse move.
-+fn viewportPixelShift(self: Surface) f64 {
-+    const gesture: f64 = self.io.terminal.screens.active.viewport_pixel_offset;
-+    if (!self.config.smooth_scroll) return gesture;
-+    const cell_height = self.size.cell.height;
-+    if (cell_height == 0) return gesture;
-+    const laid_out = @as(u32, self.size.grid().rows) * cell_height;
-+    const height = self.size.terminal().height;
-+    if (height <= laid_out) return gesture;
-+    return gesture + @as(f64, @floatFromInt(height - laid_out));
++/// Resolved by the function the render state draws with
++/// (`terminal.RenderState.resolveShift`), against the geometry the
++/// renderer hands it (`viewportGeometry` in renderer/generic.zig) — never
++/// re-derived here. The render state drops a shift it has no row to
++/// reveal, and an earlier copy of the arithmetic here, which kept it, put
++/// the pointer a row off in exactly those places (macterm#433).
++///
++/// Precondition: the render_state mutex must be held.
++fn viewportPixelShift(self: *const Surface) f64 {
++    const geometry: terminal.RenderState.Geometry = if (self.config.smooth_scroll) .{
++        .cell_height = self.size.cell.height,
++        .terminal_height = self.size.terminal().height,
++    } else .none;
++    return terminal.RenderState.resolveShift(
++        self.io.terminal.screens.active,
++        geometry,
++    ).pixel_offset;
++}
++
++/// The pointer's y for a mouse report: where it falls on the grid as drawn
++/// (see `viewportPixelShift`), so a program is told the cell the user
++/// clicked. A pointer outside the surface is left alone and one inside is
++/// kept inside, so whether an event happened outside the viewport is still
++/// decided by where the pointer really is.
++///
++/// Precondition: the render_state mutex must be held.
++fn mouseReportY(self: *const Surface, ypos: f32) f32 {
++    const height: f32 = @floatFromInt(self.size.screen.height);
++    if (ypos < 0 or ypos > height) return ypos;
++    const shift: f32 = @floatCast(self.viewportPixelShift());
++    return std.math.clamp(ypos - shift, 0, height);
 +}
 +
  /// Scroll to the bottom of the viewport.
@@ -569,7 +653,7 @@ index 4e02b6336..bf5f902b5 100644
        uniforms.projection_matrix * float4(image_pos.x, image_pos.y, 0.0f, 1.0f);
    out.tex_coord = tex_coord;
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index f8c2f60fc..298c3fb8b 100644
+index 1c897daf2..6c537549f 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
 @@ -61,6 +61,16 @@ saved_cursor: ?SavedCursor = null,
@@ -614,7 +698,7 @@ index c108456f2..539175eba 100644
  }
  
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index 6bcddb2c2..6a847039d 100644
+index 6bcddb2c2..b350c9833 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
 @@ -110,6 +110,27 @@ pub const RenderState = struct {
@@ -692,7 +776,7 @@ index 6bcddb2c2..6a847039d 100644
      /// Begin an update of the render state to the latest terminal
      /// state. Every begin must be completed with an `endUpdate` call
      /// before the render state is read.
-@@ -374,9 +425,89 @@ pub const RenderState = struct {
+@@ -374,9 +425,19 @@ pub const RenderState = struct {
          self: *RenderState,
          alloc: Allocator,
          t: *Terminal,
@@ -701,6 +785,81 @@ index 6bcddb2c2..6a847039d 100644
          const s: *Screen = t.screens.active;
 -        const viewport_pin = s.pages.getTopLeft(.viewport);
 +
++        // Smooth scrolling: which rows this update holds and where the grid
++        // sits. The surface hit-tests the pointer with the same answer.
++        const shift = resolveShift(s, geometry);
++        const viewport_pin = shift.pin;
++        const rows = shift.rows;
++        const rows_above = shift.rows_above;
++        const pixel_offset = shift.pixel_offset;
++        const pixel_pad = shift.pixel_pad;
++
+         const redraw = redraw: {
+             // If our screen key changed, we need to do a full rebuild
+             // because our render state is viewport-specific.
+@@ -398,9 +459,11 @@ pub const RenderState = struct {
+                 if (v > 0) break :redraw true;
+             }
+ 
+-            // If our dimensions changed, we do a full rebuild.
+-            if (self.rows != s.pages.rows or
+-                self.cols != s.pages.cols)
++            // If our dimensions changed, we do a full rebuild. This
++            // includes the extra smooth-scroll row coming or going.
++            if (self.rows != rows or
++                self.cols != s.pages.cols or
++                self.rows_above != rows_above)
+             {
+                 break :redraw true;
+             }
+@@ -414,9 +477,12 @@ pub const RenderState = struct {
+         };
+ 
+         // Always set our cheap fields, its more expensive to compare
+-        self.rows = s.pages.rows;
++        self.rows = rows;
+         self.cols = s.pages.cols;
+         self.viewport_pin = viewport_pin;
++        self.viewport_pixel_offset = pixel_offset;
++        self.viewport_pixel_pad = pixel_pad;
++        self.rows_above = rows_above;
+         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
+         self.cursor.cell = s.cursor.page_cell.*;
+         self.cursor.style = s.cursor.style;
+@@ -810,6 +876,124 @@ pub const RenderState = struct {
+         self.pending_styles.clearRetainingCapacity();
+     }
+ 
++    /// Where smooth scrolling puts the viewport for one update: the rows
++    /// held beyond it and how far the grid is drawn from where its rows
++    /// fall. See `resolveShift`.
++    pub const Shift = struct {
++        /// The first row held: the viewport's top-left, or the topmost row
++        /// revealed above it.
++        pin: PageList.Pin,
++        /// Rows held: the viewport's, plus any revealed above or below.
++        rows: size.CellCountInt,
++        /// How many of `rows` sit above the viewport.
++        rows_above: size.CellCountInt = 0,
++        /// How far below its row-aligned position the viewport's first row
++        /// is drawn, in pixels; negative is above. Zero when there is no
++        /// row to reveal on that side.
++        pixel_offset: f64 = 0,
++        /// The leftover height measured for this update (see `Geometry`).
++        pixel_pad: f64 = 0,
++    };
++
++    /// The smooth-scroll shift of `s`, decided exactly as an update draws
++    /// it. Anything that turns a pixel into a row or a row into a pixel
++    /// must use this rather than redo the arithmetic: the surface's hit
++    /// test did, without the checks below, and put the pointer a row off
++    /// wherever one of them drops the shift — at the bottom of scrollback
++    /// after a scroll gesture, before a pane has scrollback, and on the
++    /// alternate screen (macterm#433).
++    ///
++    /// Reads the screen's page list, so the caller must hold the lock that
++    /// guards it (the renderer state mutex).
++    pub fn resolveShift(s: *const Screen, geometry: Geometry) Shift {
 +        // Smooth scrolling: honor a sub-row offset only as far as the rows
 +        // it reveals exist, and widen our row range to include them. The
 +        // gesture's remainder and the viewport's own leftover height both
@@ -780,39 +939,19 @@ index 6bcddb2c2..6a847039d 100644
 +            if (below != null) rows += 1 else pixel_offset = 0;
 +        }
 +
-         const redraw = redraw: {
-             // If our screen key changed, we need to do a full rebuild
-             // because our render state is viewport-specific.
-@@ -398,9 +529,11 @@ pub const RenderState = struct {
-                 if (v > 0) break :redraw true;
-             }
- 
--            // If our dimensions changed, we do a full rebuild.
--            if (self.rows != s.pages.rows or
--                self.cols != s.pages.cols)
-+            // If our dimensions changed, we do a full rebuild. This
-+            // includes the extra smooth-scroll row coming or going.
-+            if (self.rows != rows or
-+                self.cols != s.pages.cols or
-+                self.rows_above != rows_above)
-             {
-                 break :redraw true;
-             }
-@@ -414,9 +547,12 @@ pub const RenderState = struct {
-         };
- 
-         // Always set our cheap fields, its more expensive to compare
--        self.rows = s.pages.rows;
-+        self.rows = rows;
-         self.cols = s.pages.cols;
-         self.viewport_pin = viewport_pin;
-+        self.viewport_pixel_offset = pixel_offset;
-+        self.viewport_pixel_pad = pixel_pad;
-+        self.rows_above = rows_above;
-         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
-         self.cursor.cell = s.cursor.page_cell.*;
-         self.cursor.style = s.cursor.style;
-@@ -1041,12 +1177,14 @@ pub const RenderState = struct {
++        return .{
++            .pin = viewport_pin,
++            .rows = rows,
++            .rows_above = rows_above,
++            .pixel_offset = pixel_offset,
++            .pixel_pad = pixel_pad,
++        };
++    }
++
+     /// Mark all render-state data as consumed by the renderer.
+     ///
+     /// This clears both the global dirty state and every per-row dirty flag.
+@@ -1041,12 +1225,14 @@ pub const RenderState = struct {
  
          // Our viewport point is sent in by the caller and can't be trusted.
          // If it is outside the valid area then just return empty because
@@ -830,7 +969,7 @@ index 6bcddb2c2..6a847039d 100644
          const link_page: *page.Page = link_pin.node.page();
          const link = link: {
              const rac = link_page.getRowAndCell(
-@@ -1701,7 +1839,7 @@ test "begin and end update" {
+@@ -1701,7 +1887,7 @@ test "begin and end update" {
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -839,7 +978,7 @@ index 6bcddb2c2..6a847039d 100644
  
      // We should have pending style runs on row 0: one for the bold
      // run and one for the italic run.
-@@ -2395,3 +2533,194 @@ test "dirty row resets highlights" {
+@@ -2395,3 +2581,272 @@ test "dirty row resets highlights" {
          try testing.expectEqual(0, row_highlights[0].items.len);
      }
  }
@@ -1033,4 +1172,82 @@ index 6bcddb2c2..6a847039d 100644
 +    try state.update(alloc, &t);
 +    try testing.expectEqual(0, state.viewport_pixel_offset);
 +    try testing.expectEqual(0, state.rows_above);
++}
++
++test "RenderState resolveShift is the shift an update draws" {
++    // The surface hit-tests the pointer, reports mouse cells and places the
++    // IME with resolveShift (macterm#433). Wherever an update drops or caps
++    // the shift, so must it, or a click lands a row off what is drawn.
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    const io = testing.io;
++
++    var t = try Terminal.init(io, alloc, .{
++        .cols = 10,
++        .rows = 3,
++    });
++    defer t.deinit(alloc);
++
++    var s = t.vtStream();
++    defer s.deinit();
++
++    var state: RenderState = .empty;
++    defer state.deinit(alloc);
++
++    // Three 10px rows in 36px: a 6px leftover.
++    const geometry: RenderState.Geometry = .{ .cell_height = 10, .terminal_height = 36 };
++    const expectShift = struct {
++        fn expectShift(
++            rs: *RenderState,
++            term: *Terminal,
++            g: RenderState.Geometry,
++            want: f64,
++        ) !void {
++            const shift = RenderState.resolveShift(term.screens.active, g);
++            try rs.beginUpdate(std.testing.allocator, term, g);
++            rs.endUpdate();
++            try std.testing.expectEqual(want, shift.pixel_offset);
++            try std.testing.expectEqual(rs.viewport_pixel_offset, shift.pixel_offset);
++            try std.testing.expectEqual(rs.viewport_pixel_pad, shift.pixel_pad);
++            try std.testing.expectEqual(rs.rows_above, shift.rows_above);
++            try std.testing.expectEqual(rs.rows, shift.rows);
++        }
++    }.expectShift;
++
++    // No scrollback yet: nothing above to reveal, so the leftover stays
++    // padding and the grid is drawn where its rows fall.
++    s.nextSlice("1\r\n2");
++    try expectShift(&state, &t, geometry, 0);
++
++    // Once there is scrollback the grid sits on the leftover...
++    s.nextSlice("\r\n3\r\n4\r\n5");
++    try expectShift(&state, &t, geometry, 6);
++
++    // ...and stays there when a gesture pinned at the bottom leaves a
++    // remainder: nothing lies below to reveal, so the remainder is dropped.
++    t.screens.active.viewport_pixel_offset = -4;
++    try expectShift(&state, &t, geometry, 6);
++
++    // Scrolled into history there are rows on both sides; both count.
++    t.scrollViewport(.{ .delta = -1 });
++    t.screens.active.viewport_pixel_offset = -4;
++    try expectShift(&state, &t, geometry, 2);
++
++    // At the top of history nothing lies above: remainder and leftover
++    // both drop.
++    t.scrollViewport(.top);
++    t.screens.active.viewport_pixel_offset = 4;
++    try expectShift(&state, &t, geometry, 0);
++
++    // One row of scrollback above, asked for more than a row: capped at
++    // the row there is.
++    t.scrollViewport(.{ .delta = 1 });
++    t.screens.active.viewport_pixel_offset = 8;
++    try expectShift(&state, &t, geometry, 10);
++
++    // The alternate screen has no scrollback at all.
++    t.scrollViewport(.bottom);
++    s.nextSlice("\x1b[?1049h");
++    t.screens.active.viewport_pixel_offset = 4;
++    try expectShift(&state, &t, geometry, 0);
 +}
