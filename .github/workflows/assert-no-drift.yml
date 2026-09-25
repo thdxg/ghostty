@@ -22,11 +22,24 @@ name: Assert No Drift
 #      .github/downstream/*.patch declares) — i.e. it reverted or edited
 #      upstream source it shouldn't. This file-set check is the real guarantee;
 #      it holds regardless of how the downstream commits are structured.
+#
+# A second job, `reproducible`, runs on every pull request to main and every
+# push to it. It replays the sync (pristine upstream + DOWNSTREAM_FILES +
+# .github/downstream/*.patch) onto the tree's upstream base and fails unless
+# the result IS that tree. The file-set check above can't see a PR that edits
+# src/ without regenerating the patch that carries it — the path is
+# allowlisted — and the next sync, which rebuilds main from the patches alone,
+# then drops the change without a word: thdxg/ghostty#11 was lost that way on
+# 2026-09-23.
 
 on:
   schedule:
     - cron: "0 7 * * *" # an hour after sync-upstream's 6am run
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -51,6 +64,9 @@ env:
 
 jobs:
   assert:
+    # The freshness half would fail an unrelated PR whenever the sync is
+    # behind, so this job keeps to its schedule.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,3 +163,71 @@ jobs:
           fi
 
           echo "OK: main rides only the allowlisted downstream delta on pristine upstream."
+
+  reproducible:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert the sync reproduces this tree
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/ghostty-org/ghostty.git
+          git fetch --quiet upstream main
+
+          head="$(git rev-parse HEAD)"
+          base="$(git merge-base HEAD upstream/main)"
+          echo "Tree under test          = $head"
+          echo "Upstream base (merge-base) = $base"
+
+          # The files the sync lays down verbatim: sync-upstream.yml's own
+          # DOWNSTREAM_FILES, read from this tree, since that is the list the sync
+          # will run with once this lands.
+          files="$(awk '/^  DOWNSTREAM_FILES: >-/{f=1;next} f&&/^    /{print $1;next} f{exit}' .github/workflows/sync-upstream.yml)"
+          if [ -z "$files" ]; then
+            echo "::error::Could not read DOWNSTREAM_FILES from sync-upstream.yml." >&2
+            exit 1
+          fi
+          # ...and it must be this workflow's list too, which the scheduled job
+          # checks the patches against. Both are edited by hand.
+          if [ "$(printf '%s\n' $files | sort)" != "$(printf '%s\n' $DOWNSTREAM_FILES | sort)" ]; then
+            echo "::error::DOWNSTREAM_FILES differs between sync-upstream.yml and assert-no-drift.yml; update both." >&2
+            exit 1
+          fi
+
+          # Replay the sync: pristine upstream, the fork-owned files on top, then
+          # every source patch in filename order, exactly as sync-upstream.yml does.
+          replay="$(mktemp -d)"
+          git worktree add --quiet --detach "$replay" "$base"
+          for f in $files; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Declared downstream file is missing: $f" >&2
+              exit 1
+            fi
+            mkdir -p "$replay/$(dirname "$f")"
+            cp "$f" "$replay/$f"
+            git -C "$replay" add "$f"
+          done
+          shopt -s nullglob
+          for p in "$replay"/.github/downstream/*.patch; do
+            echo "Applying downstream patch: ${p#"$replay/"}"
+            if ! git -C "$replay" apply --3way --index "$p"; then
+              echo "::error::Downstream patch does not apply to upstream: ${p#"$replay/"}" >&2
+              exit 1
+            fi
+          done
+
+          # What the sync would produce must be this tree, file for file. A path
+          # that differs is a change the sync would drop or rewrite.
+          if ! git -C "$replay" diff --cached --quiet "$head"; then
+            echo "::error::The next sync would not reproduce this tree. Paths that differ between it and pristine upstream + DOWNSTREAM_FILES + .github/downstream/*.patch:" >&2
+            git -C "$replay" diff --cached --stat "$head" | sed 's/^/  /' >&2
+            echo "::error::A source change has to reach main as a regenerated .github/downstream/*.patch in the same PR; the sync rebuilds main from the patches alone and drops anything else (thdxg/ghostty#11 was lost this way on 2026-09-23)." >&2
+            exit 1
+          fi
+          echo "OK: the sync reproduces this tree exactly."
