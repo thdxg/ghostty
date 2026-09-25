@@ -1005,10 +1005,14 @@ palette: Palette = .{},
 /// this keeps the sub-row remainder and renders it, which is what makes
 /// the motion continuous, momentum included.
 ///
-/// Only the scrollback viewport scrolls this way. Programs that draw their
-/// own screen (the alternate screen: editors, pagers) repaint by rows, and
-/// mouse reporting turns the wheel into button events, so neither is
-/// affected. Discrete wheels always scroll by whole rows.
+/// The scrollback viewport scrolls this way. A program on the alternate
+/// screen (an editor, a pager) that scrolls a region of its screen by rows
+/// with the terminal's scroll margins (DECSTBM/DECSLRM with SU/SD, or an
+/// index at the margin) is animated too: the region's new content slides in
+/// from where the old content was, and the rows that scrolled out slide
+/// away with it. A program that repaints every cell instead gets no motion,
+/// and mouse reporting still turns the wheel into button events. Discrete
+/// wheels always scroll the viewport by whole rows.
 ///
 /// Downstream (thdxg/ghostty) key, read by Macterm's Experimental settings.
 /// This can be changed at runtime.
