@@ -2141,12 +2141,14 @@ fn resolvePathForOpening(
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
 /// keyboard should be rendered.
-pub fn imePoint(self: *const Surface) apprt.IMEPos {
+pub fn imePoint(self: *Surface) apprt.IMEPos {
     self.renderer_state.mutex.lockUncancelable(global.io());
     const cursor = self.renderer_state.terminal.screens.active.cursor;
     const preedit_width: usize = if (self.renderer_state.preedit) |preedit| preedit.width() else 0;
-    // Smooth scrolling draws the grid, and the cursor with it, shifted.
-    const shift = self.viewportPixelShift();
+    // Smooth scrolling draws the grid, and the cursor with it, shifted, and
+    // a region scroll animation shifts the cursor's region further still.
+    const shift = self.viewportPixelShift() +
+        self.regionShifts().offsetAt(cursor.x, cursor.y);
     self.renderer_state.mutex.unlock(global.io());
 
     // TODO: need to handle when scrolling and the cursor is not
@@ -3797,7 +3799,7 @@ fn mouseReport(
         .mods = mods,
         .pos = .{
             .x = pos.x,
-            .y = self.mouseReportY(pos.y),
+            .y = self.mouseReportY(pos.x, pos.y),
         },
     }, encoding_opts) catch |err| switch (err) {
         error.WriteFailed => {
@@ -4818,13 +4820,15 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 /// The viewport cell under a surface position.
 ///
 /// Precondition: the render_state mutex must be held.
-pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
-    // Smooth scrolling draws the viewport shifted by a sub-row offset;
-    // undo it so the hit-tested cell is the one under the pointer.
+pub fn posToViewport(self: *Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+    // Smooth scrolling draws the viewport shifted by a sub-row offset, and
+    // a region scroll animation draws its region's content further off
+    // still; undo both so the hit-tested cell is the one under the pointer.
     const offset: f64 = self.viewportPixelShift();
+    const y = self.regionContentY(xpos, ypos - offset);
 
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos - offset } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = y } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
 }
@@ -4853,18 +4857,63 @@ fn viewportPixelShift(self: *const Surface) f64 {
     ).pixel_offset;
 }
 
-/// The pointer's y for a mouse report: where it falls on the grid as drawn
-/// (see `viewportPixelShift`), so a program is told the cell the user
-/// clicked. A pointer outside the surface is left alone and one inside is
-/// kept inside, so whether an event happened outside the viewport is still
-/// decided by where the pointer really is.
+/// The region scroll offsets of the frame on screen, as the shift between
+/// each region's content as drawn and where the terminal has it now
+/// (`terminal.RenderState.RegionShifts`). The renderer publishes them as
+/// it presents a frame, with the region scrolls it has taken in since
+/// folded in; the ones still pending on the screen are folded in here. So
+/// a program scrolling while the region eases home, as momentum scrolling
+/// does, never leaves a click resolving against rows that have moved.
+///
+/// Empty with smooth scrolling off, and when the frame on screen was drawn
+/// for another screen or grid size (its regions describe content that is
+/// gone, and the renderer drops them on its next update).
 ///
 /// Precondition: the render_state mutex must be held.
-fn mouseReportY(self: *const Surface, ypos: f32) f32 {
+fn regionShifts(self: *Surface) terminal.RenderState.RegionShifts {
+    if (!self.config.smooth_scroll) return .{};
+    const t: *const terminal.Terminal = &self.io.terminal;
+    var shifts = self.renderer.regionShifts();
+    if (!shifts.describes(t)) return .{};
+    const cell_height: f64 = @floatFromInt(self.size.cell.height);
+    for (t.screens.active.region_scrolls.slice()) |scroll| {
+        shifts.addScroll(scroll, cell_height);
+    }
+    return shifts;
+}
+
+/// The surface y of where the terminal has the content drawn at (`xpos`,
+/// `ypos`), with the viewport's own shift already undone from `ypos`: moved
+/// by the region scroll animation drawn there (see `regionShifts`), if any.
+/// A point on a row the region has scrolled out resolves to its edge row.
+///
+/// Precondition: the render_state mutex must be held.
+fn regionContentY(self: *Surface, xpos: f64, ypos: f64) f64 {
+    const shifts = self.regionShifts();
+    if (shifts.len == 0) return ypos;
+    const left: f64 = @floatFromInt(self.size.padding.left);
+    const top: f64 = @floatFromInt(self.size.padding.top);
+    return shifts.contentY(
+        xpos - left,
+        ypos - top,
+        @floatFromInt(self.size.cell.width),
+        @floatFromInt(self.size.cell.height),
+    ) + top;
+}
+
+/// The pointer's y for a mouse report: where it falls on the grid as drawn
+/// (see `viewportPixelShift` and `regionContentY`), so a program is told
+/// the cell the user clicked. A pointer outside the surface is left alone
+/// and one inside is kept inside, so whether an event happened outside the
+/// viewport is still decided by where the pointer really is.
+///
+/// Precondition: the render_state mutex must be held.
+fn mouseReportY(self: *Surface, xpos: f32, ypos: f32) f32 {
     const height: f32 = @floatFromInt(self.size.screen.height);
     if (ypos < 0 or ypos > height) return ypos;
-    const shift: f32 = @floatCast(self.viewportPixelShift());
-    return std.math.clamp(ypos - shift, 0, height);
+    const shift = self.viewportPixelShift();
+    const y: f32 = @floatCast(self.regionContentY(xpos, @as(f64, ypos) - shift));
+    return std.math.clamp(y, 0, height);
 }
 
 /// Scroll to the bottom of the viewport.
