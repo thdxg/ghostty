@@ -357,6 +357,13 @@ pub const Action = union(Key) {
     /// Move a tab to a new window.
     move_tab_to_new_window,
 
+    /// Resize the window containing the target surface so that the
+    /// surface is the given size in points. A zero dimension should be
+    /// kept as is. This is requested by the running program (CSI 8 t)
+    /// and apprts may ignore it, for example if the surface is in a
+    /// split or the window is fullscreen.
+    resize_window: ResizeWindow,
+
     /// A throttled heartbeat emitted from the IO path whenever the
     /// child/pty produces output. Unlike `scrollbar` (a renderer-track
     /// action that stops while the surface is occluded), this is delivered
@@ -438,6 +445,7 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         move_tab_to_new_window,
+        resize_window,
         output_activity,
 
         test "ghostty.h Action.Key" {
@@ -741,6 +749,11 @@ pub const InitialSize = extern struct {
 
         .none => void,
     };
+};
+
+pub const ResizeWindow = extern struct {
+    width: u32,
+    height: u32,
 };
 
 pub const CellSize = extern struct {
