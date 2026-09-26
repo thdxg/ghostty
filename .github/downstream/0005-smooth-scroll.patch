@@ -1,5 +1,5 @@
 diff --git a/src/Surface.zig b/src/Surface.zig
-index 977227c9e..896cb2ba6 100644
+index 977227c9e..9efcc3acd 100644
 --- a/src/Surface.zig
 +++ b/src/Surface.zig
 @@ -323,6 +323,7 @@ const DerivedConfig = struct {
@@ -107,7 +107,82 @@ index 977227c9e..896cb2ba6 100644
          },
      }, encoding_opts) catch |err| switch (err) {
          error.WriteFailed => {
-@@ -4684,9 +4709,6 @@ pub fn cursorPosCallback(
+@@ -3974,13 +3999,10 @@ pub fn mouseButtonCallback(
+         // If we can't map the release position to a cell, pass null so the
+         // gesture can conservatively treat the release as having moved away
+         // from the pressed cell.
+-        const release_pin: ?terminal.Pin = if (release_pos) |pos| pin: {
+-            const release_vp = self.posToViewport(pos.x, pos.y);
+-            break :pin self.io.terminal.screens.active.pages.pin(.{ .viewport = .{
+-                .x = release_vp.x,
+-                .y = release_vp.y,
+-            } });
+-        } else null;
++        const release_pin: ?terminal.Pin = if (release_pos) |pos|
++            self.posToPin(pos.x, pos.y)
++        else
++            null;
+         self.mouse.selection_gesture.release(
+             self.renderer_state.terminal,
+             .{ .pin = release_pin },
+@@ -4078,26 +4100,15 @@ pub fn mouseButtonCallback(
+         self.renderer_state.mutex.lockUncancelable(global.io());
+         defer self.renderer_state.mutex.unlock(global.io());
+         const t: *terminal.Terminal = self.renderer_state.terminal;
+-        const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+ 
+         const pos = try self.rt_surface.getCursorPos();
+-        const pin = pin: {
+-            const pt_viewport = self.posToViewport(pos.x, pos.y);
+-            const pin = screen.pages.pin(.{
+-                .viewport = .{
+-                    .x = pt_viewport.x,
+-                    .y = pt_viewport.y,
+-                },
+-            }) orelse {
+-                // Weird... our viewport x/y that we just converted isn't
+-                // found in our pages. This is probably a bug but we don't
+-                // want to crash in releases because its harmless. So, we
+-                // only assert in debug mode.
+-                if (comptime std.debug.runtime_safety) unreachable;
+-                break :click;
+-            };
+-
+-            break :pin pin;
++        const pin = self.posToPin(pos.x, pos.y) orelse {
++            // Weird... our viewport x/y that we just converted isn't
++            // found in our pages. This is probably a bug but we don't
++            // want to crash in releases because its harmless. So, we
++            // only assert in debug mode.
++            if (comptime std.debug.runtime_safety) unreachable;
++            break :click;
+         };
+ 
+         var press_selection = try self.mouse.selection_gesture.press(t, .{
+@@ -4181,19 +4192,9 @@ pub fn mouseButtonCallback(
+         // Get our viewport pin
+         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+         const pos = try self.rt_surface.getCursorPos();
+-        const pin = pin: {
+-            const pt_viewport = self.posToViewport(pos.x, pos.y);
+-            const pin = screen.pages.pin(.{
+-                .viewport = .{
+-                    .x = pt_viewport.x,
+-                    .y = pt_viewport.y,
+-                },
+-            }) orelse {
+-                if (comptime std.debug.runtime_safety) unreachable;
+-                break :sel;
+-            };
+-
+-            break :pin pin;
++        const pin = self.posToPin(pos.x, pos.y) orelse {
++            if (comptime std.debug.runtime_safety) unreachable;
++            break :sel;
+         };
+ 
+         switch (self.config.right_click_action) {
+@@ -4684,9 +4685,6 @@ pub fn cursorPosCallback(
      // Update our modifiers if they changed
      if (mods) |v| self.modsChanged(v);
  
@@ -117,7 +192,7 @@ index 977227c9e..896cb2ba6 100644
      // We always reset the over link status because it will be reprocessed
      // below. But we need the old value to know if we need to undo mouse
      // shape changes.
-@@ -4697,6 +4719,9 @@ pub fn cursorPosCallback(
+@@ -4697,6 +4695,9 @@ pub fn cursorPosCallback(
      self.renderer_state.mutex.lockUncancelable(global.io());
      defer self.renderer_state.mutex.unlock(global.io());
  
@@ -127,7 +202,22 @@ index 977227c9e..896cb2ba6 100644
      // Update our mouse state. We set this to null initially because we only
      // want to set it when we're not selecting or doing any other mouse
      // event.
-@@ -4850,13 +4875,105 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+@@ -4780,13 +4781,7 @@ pub fn cursorPosCallback(
+         try self.queueRender();
+ 
+         // Convert to points
+-        const screen: *terminal.Screen = t.screens.active;
+-        const pin = screen.pages.pin(.{
+-            .viewport = .{
+-                .x = pos_vp.x,
+-                .y = pos_vp.y,
+-            },
+-        }) orelse {
++        const pin = self.posToPin(pos.x, pos.y) orelse {
+             if (comptime std.debug.runtime_safety) unreachable;
+             return;
+         };
+@@ -4850,13 +4845,135 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
      self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
  }
  
@@ -163,6 +253,14 @@ index 977227c9e..896cb2ba6 100644
 +///
 +/// Precondition: the render_state mutex must be held.
 +fn viewportPixelShift(self: *const Surface) f64 {
++    return self.viewportShift().pixel_offset;
++}
++
++/// The whole smooth-scroll shift the renderer draws, rows revealed and all;
++/// see `viewportPixelShift`.
++///
++/// Precondition: the render_state mutex must be held.
++fn viewportShift(self: *const Surface) terminal.RenderState.Shift {
 +    const geometry: terminal.RenderState.Geometry = if (self.config.smooth_scroll) .{
 +        .cell_height = self.size.cell.height,
 +        .terminal_height = self.size.terminal().height,
@@ -170,7 +268,29 @@ index 977227c9e..896cb2ba6 100644
 +    return terminal.RenderState.resolveShift(
 +        self.io.terminal.screens.active,
 +        geometry,
-+    ).pixel_offset;
++    );
++}
++
++/// The pin of the cell drawn under a surface position. This is
++/// `posToViewport` resolved to a pin, except on the rows smooth scrolling
++/// reveals above the viewport: a grid shifted down draws the bottom of the
++/// scrollback row above the viewport — all of it, when the leftover height
++/// is nearly a cell — and a viewport coordinate, which cannot go above the
++/// viewport, clamps a point there to the first row. Selection resolves the
++/// pointer with this so that row selects like any other row drawn.
++///
++/// Precondition: the render_state mutex must be held.
++fn posToPin(self: *Surface, xpos: f64, ypos: f64) ?terminal.Pin {
++    const screen: *terminal.Screen = self.io.terminal.screens.active;
++    const pt = self.posToViewport(xpos, ypos);
++    const above = self.viewportShift().rowsAboveAt(
++        ypos - @as(f64, @floatFromInt(self.size.padding.top)),
++        @floatFromInt(self.size.cell.height),
++    );
++    if (above == 0) return screen.pages.pin(.{ .viewport = pt });
++    var pin = screen.pages.getTopLeft(.viewport).up(above) orelse return null;
++    pin.x = pt.x;
++    return pin;
 +}
 +
 +/// The region scroll offsets of the frame on screen, as the shift between
@@ -2036,7 +2156,7 @@ index 69733661a..eff19e764 100644
      const alloc = testing.allocator;
      const io_impl = testing.io;
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index 668cb08df..44b78d72f 100644
+index 668cb08df..a148d94fc 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
 @@ -184,6 +184,25 @@ pub const RenderState = struct {
@@ -2185,7 +2305,7 @@ index 668cb08df..44b78d72f 100644
                  };
              }
  
-@@ -1006,6 +1091,270 @@ pub const RenderState = struct {
+@@ -1006,6 +1091,289 @@ pub const RenderState = struct {
          self.pending_styles.clearRetainingCapacity();
      }
  
@@ -2203,6 +2323,25 @@ index 668cb08df..44b78d72f 100644
 +        pixel_offset: f64 = 0,
 +        /// The leftover height measured for this update (see `Geometry`).
 +        pixel_pad: f64 = 0,
++
++        /// How many rows above the viewport are drawn at `y`, pixels below
++        /// the top of the terminal area; 0 on the viewport's own rows.
++        /// The rows this shift reveals are drawn above the viewport's
++        /// first row, from the top of the terminal area down to
++        /// `pixel_offset`, and a point there is on one of them — not on
++        /// the first row, which is where a viewport coordinate (which
++        /// cannot go above it) clamps it. A point above the terminal area,
++        /// in the padding, is on the topmost row drawn, as it would be on
++        /// the first row with no shift.
++        pub fn rowsAboveAt(self: Shift, y: f64, cell_height: f64) usize {
++            if (self.overscan.above == 0 or cell_height <= 0) return 0;
++            const above = self.pixel_offset - @max(y, 0);
++            if (above <= 0) return 0;
++            return @min(
++                @as(usize, @intFromFloat(@ceil(above / cell_height))),
++                self.overscan.above,
++            );
++        }
 +    };
 +
 +    /// The smooth-scroll shift of `s`, decided exactly as an update draws
@@ -2456,7 +2595,7 @@ index 668cb08df..44b78d72f 100644
      /// Mark all render-state data as consumed by the renderer.
      ///
      /// This clears both the global dirty state and every per-row dirty flag.
-@@ -3031,3 +3380,497 @@ test "overscan selection on overscan rows" {
+@@ -3031,3 +3399,535 @@ test "overscan selection on overscan rows" {
      );
      try testing.expect(sels[vp + state.rows - 2] == null);
  }
@@ -2748,6 +2887,44 @@ index 668cb08df..44b78d72f 100644
 +    s.nextSlice("\x1b[?1049h");
 +    t.screens.active.viewport_pixel_offset = 4;
 +    try expectShift(&state, &t, geometry, 0);
++}
++
++test "RenderState Shift rowsAboveAt resolves the revealed rows" {
++    // The surface selects the rows a shift reveals above the viewport with
++    // this, so they select like any other row drawn.
++    const testing = std.testing;
++
++    // No shift, or one with nothing revealed: always the viewport.
++    const none: RenderState.Shift = .{};
++    try testing.expectEqual(0, none.rowsAboveAt(0, 10));
++    try testing.expectEqual(0, none.rowsAboveAt(-5, 10));
++    const below: RenderState.Shift = .{
++        .overscan = .{ .below = 1 },
++        .pixel_offset = -4,
++    };
++    try testing.expectEqual(0, below.rowsAboveAt(0, 10));
++
++    // Most of a row revealed: it fills the strip down to the grid.
++    const one: RenderState.Shift = .{
++        .overscan = .{ .above = 1 },
++        .pixel_offset = 8,
++    };
++    try testing.expectEqual(1, one.rowsAboveAt(0, 10));
++    try testing.expectEqual(1, one.rowsAboveAt(7.9, 10));
++    try testing.expectEqual(0, one.rowsAboveAt(8, 10));
++    try testing.expectEqual(0, one.rowsAboveAt(25, 10));
++    // The padding above is on the topmost row drawn.
++    try testing.expectEqual(1, one.rowsAboveAt(-20, 10));
++
++    // More than a row revealed (a gesture's remainder on the leftover).
++    const two: RenderState.Shift = .{
++        .overscan = .{ .above = 2 },
++        .pixel_offset = 14,
++    };
++    try testing.expectEqual(2, two.rowsAboveAt(0, 10));
++    try testing.expectEqual(2, two.rowsAboveAt(3.9, 10));
++    try testing.expectEqual(1, two.rowsAboveAt(4, 10));
++    try testing.expectEqual(0, two.rowsAboveAt(14, 10));
 +}
 +
 +test "RenderState RegionShifts resolves a point to the row drawn there" {

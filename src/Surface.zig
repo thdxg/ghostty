@@ -3999,13 +3999,10 @@ pub fn mouseButtonCallback(
         // If we can't map the release position to a cell, pass null so the
         // gesture can conservatively treat the release as having moved away
         // from the pressed cell.
-        const release_pin: ?terminal.Pin = if (release_pos) |pos| pin: {
-            const release_vp = self.posToViewport(pos.x, pos.y);
-            break :pin self.io.terminal.screens.active.pages.pin(.{ .viewport = .{
-                .x = release_vp.x,
-                .y = release_vp.y,
-            } });
-        } else null;
+        const release_pin: ?terminal.Pin = if (release_pos) |pos|
+            self.posToPin(pos.x, pos.y)
+        else
+            null;
         self.mouse.selection_gesture.release(
             self.renderer_state.terminal,
             .{ .pin = release_pin },
@@ -4103,26 +4100,15 @@ pub fn mouseButtonCallback(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         const t: *terminal.Terminal = self.renderer_state.terminal;
-        const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
 
         const pos = try self.rt_surface.getCursorPos();
-        const pin = pin: {
-            const pt_viewport = self.posToViewport(pos.x, pos.y);
-            const pin = screen.pages.pin(.{
-                .viewport = .{
-                    .x = pt_viewport.x,
-                    .y = pt_viewport.y,
-                },
-            }) orelse {
-                // Weird... our viewport x/y that we just converted isn't
-                // found in our pages. This is probably a bug but we don't
-                // want to crash in releases because its harmless. So, we
-                // only assert in debug mode.
-                if (comptime std.debug.runtime_safety) unreachable;
-                break :click;
-            };
-
-            break :pin pin;
+        const pin = self.posToPin(pos.x, pos.y) orelse {
+            // Weird... our viewport x/y that we just converted isn't
+            // found in our pages. This is probably a bug but we don't
+            // want to crash in releases because its harmless. So, we
+            // only assert in debug mode.
+            if (comptime std.debug.runtime_safety) unreachable;
+            break :click;
         };
 
         var press_selection = try self.mouse.selection_gesture.press(t, .{
@@ -4206,19 +4192,9 @@ pub fn mouseButtonCallback(
         // Get our viewport pin
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
         const pos = try self.rt_surface.getCursorPos();
-        const pin = pin: {
-            const pt_viewport = self.posToViewport(pos.x, pos.y);
-            const pin = screen.pages.pin(.{
-                .viewport = .{
-                    .x = pt_viewport.x,
-                    .y = pt_viewport.y,
-                },
-            }) orelse {
-                if (comptime std.debug.runtime_safety) unreachable;
-                break :sel;
-            };
-
-            break :pin pin;
+        const pin = self.posToPin(pos.x, pos.y) orelse {
+            if (comptime std.debug.runtime_safety) unreachable;
+            break :sel;
         };
 
         switch (self.config.right_click_action) {
@@ -4805,13 +4781,7 @@ pub fn cursorPosCallback(
         try self.queueRender();
 
         // Convert to points
-        const screen: *terminal.Screen = t.screens.active;
-        const pin = screen.pages.pin(.{
-            .viewport = .{
-                .x = pos_vp.x,
-                .y = pos_vp.y,
-            },
-        }) orelse {
+        const pin = self.posToPin(pos.x, pos.y) orelse {
             if (comptime std.debug.runtime_safety) unreachable;
             return;
         };
@@ -4905,6 +4875,14 @@ pub fn posToViewport(self: *Surface, xpos: f64, ypos: f64) terminal.point.Coordi
 ///
 /// Precondition: the render_state mutex must be held.
 fn viewportPixelShift(self: *const Surface) f64 {
+    return self.viewportShift().pixel_offset;
+}
+
+/// The whole smooth-scroll shift the renderer draws, rows revealed and all;
+/// see `viewportPixelShift`.
+///
+/// Precondition: the render_state mutex must be held.
+fn viewportShift(self: *const Surface) terminal.RenderState.Shift {
     const geometry: terminal.RenderState.Geometry = if (self.config.smooth_scroll) .{
         .cell_height = self.size.cell.height,
         .terminal_height = self.size.terminal().height,
@@ -4912,7 +4890,29 @@ fn viewportPixelShift(self: *const Surface) f64 {
     return terminal.RenderState.resolveShift(
         self.io.terminal.screens.active,
         geometry,
-    ).pixel_offset;
+    );
+}
+
+/// The pin of the cell drawn under a surface position. This is
+/// `posToViewport` resolved to a pin, except on the rows smooth scrolling
+/// reveals above the viewport: a grid shifted down draws the bottom of the
+/// scrollback row above the viewport — all of it, when the leftover height
+/// is nearly a cell — and a viewport coordinate, which cannot go above the
+/// viewport, clamps a point there to the first row. Selection resolves the
+/// pointer with this so that row selects like any other row drawn.
+///
+/// Precondition: the render_state mutex must be held.
+fn posToPin(self: *Surface, xpos: f64, ypos: f64) ?terminal.Pin {
+    const screen: *terminal.Screen = self.io.terminal.screens.active;
+    const pt = self.posToViewport(xpos, ypos);
+    const above = self.viewportShift().rowsAboveAt(
+        ypos - @as(f64, @floatFromInt(self.size.padding.top)),
+        @floatFromInt(self.size.cell.height),
+    );
+    if (above == 0) return screen.pages.pin(.{ .viewport = pt });
+    var pin = screen.pages.getTopLeft(.viewport).up(above) orelse return null;
+    pin.x = pt.x;
+    return pin;
 }
 
 /// The region scroll offsets of the frame on screen, as the shift between

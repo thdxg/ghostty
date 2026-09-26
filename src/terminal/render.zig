@@ -1105,6 +1105,25 @@ pub const RenderState = struct {
         pixel_offset: f64 = 0,
         /// The leftover height measured for this update (see `Geometry`).
         pixel_pad: f64 = 0,
+
+        /// How many rows above the viewport are drawn at `y`, pixels below
+        /// the top of the terminal area; 0 on the viewport's own rows.
+        /// The rows this shift reveals are drawn above the viewport's
+        /// first row, from the top of the terminal area down to
+        /// `pixel_offset`, and a point there is on one of them — not on
+        /// the first row, which is where a viewport coordinate (which
+        /// cannot go above it) clamps it. A point above the terminal area,
+        /// in the padding, is on the topmost row drawn, as it would be on
+        /// the first row with no shift.
+        pub fn rowsAboveAt(self: Shift, y: f64, cell_height: f64) usize {
+            if (self.overscan.above == 0 or cell_height <= 0) return 0;
+            const above = self.pixel_offset - @max(y, 0);
+            if (above <= 0) return 0;
+            return @min(
+                @as(usize, @intFromFloat(@ceil(above / cell_height))),
+                self.overscan.above,
+            );
+        }
     };
 
     /// The smooth-scroll shift of `s`, decided exactly as an update draws
@@ -3668,6 +3687,44 @@ test "RenderState resolveShift is the shift an update draws" {
     s.nextSlice("\x1b[?1049h");
     t.screens.active.viewport_pixel_offset = 4;
     try expectShift(&state, &t, geometry, 0);
+}
+
+test "RenderState Shift rowsAboveAt resolves the revealed rows" {
+    // The surface selects the rows a shift reveals above the viewport with
+    // this, so they select like any other row drawn.
+    const testing = std.testing;
+
+    // No shift, or one with nothing revealed: always the viewport.
+    const none: RenderState.Shift = .{};
+    try testing.expectEqual(0, none.rowsAboveAt(0, 10));
+    try testing.expectEqual(0, none.rowsAboveAt(-5, 10));
+    const below: RenderState.Shift = .{
+        .overscan = .{ .below = 1 },
+        .pixel_offset = -4,
+    };
+    try testing.expectEqual(0, below.rowsAboveAt(0, 10));
+
+    // Most of a row revealed: it fills the strip down to the grid.
+    const one: RenderState.Shift = .{
+        .overscan = .{ .above = 1 },
+        .pixel_offset = 8,
+    };
+    try testing.expectEqual(1, one.rowsAboveAt(0, 10));
+    try testing.expectEqual(1, one.rowsAboveAt(7.9, 10));
+    try testing.expectEqual(0, one.rowsAboveAt(8, 10));
+    try testing.expectEqual(0, one.rowsAboveAt(25, 10));
+    // The padding above is on the topmost row drawn.
+    try testing.expectEqual(1, one.rowsAboveAt(-20, 10));
+
+    // More than a row revealed (a gesture's remainder on the leftover).
+    const two: RenderState.Shift = .{
+        .overscan = .{ .above = 2 },
+        .pixel_offset = 14,
+    };
+    try testing.expectEqual(2, two.rowsAboveAt(0, 10));
+    try testing.expectEqual(2, two.rowsAboveAt(3.9, 10));
+    try testing.expectEqual(1, two.rowsAboveAt(4, 10));
+    try testing.expectEqual(0, two.rowsAboveAt(14, 10));
 }
 
 test "RenderState RegionShifts resolves a point to the row drawn there" {
