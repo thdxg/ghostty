@@ -1,8 +1,8 @@
 diff --git a/src/config/Config.zig b/src/config/Config.zig
-index ac7af7968..ed2f4ffdd 100644
+index 071bb1fbe..6bdf69c92 100644
 --- a/src/config/Config.zig
 +++ b/src/config/Config.zig
-@@ -3171,7 +3171,13 @@ keybind: Keybinds = .{},
+@@ -3190,7 +3190,13 @@ keybind: Keybinds = .{},
  ///
  ///  * `vec4 iPreviousCursorStyle` - Style of the previous terminal cursor
  ///
@@ -18,10 +18,10 @@ index ac7af7968..ed2f4ffdd 100644
  ///  * `float iTimeCursorChange` - Timestamp of terminal cursor change.
  ///
 diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
-index e1e4bc487..d6eab6898 100644
+index 88bfcd18c..d3b4fe2af 100644
 --- a/src/renderer/generic.zig
 +++ b/src/renderer/generic.zig
-@@ -2330,8 +2330,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+@@ -2925,8 +2925,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                  };
              }
  
@@ -33,7 +33,7 @@ index e1e4bc487..d6eab6898 100644
  
              // Cursor style
              const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
-@@ -2452,6 +2453,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+@@ -3047,6 +3048,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                      uniforms.current_cursor_color = cursor_color;
                      uniforms.cursor_change_time = uniforms.time;
                  }
