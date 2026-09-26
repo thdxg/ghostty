@@ -1,4 +1,4 @@
-From ecb2fc597b88916cfb473c734044caf8db8abd87 Mon Sep 17 00:00:00 2001
+From ffebb7338488094bb2cf24259a2ed3b8653564ef Mon Sep 17 00:00:00 2001
 From: Mateusz Urban <mateuszurban2@gmail.com>
 Date: Mon, 6 Jul 2026 08:26:32 +0200
 Subject: [PATCH] apprt: add output_activity action for throttled IO-path
@@ -30,19 +30,19 @@ ghostty_action_tag_e so existing tag values remain unchanged.
  7 files changed, 115 insertions(+)
 
 diff --git a/include/ghostty.h b/include/ghostty.h
-index a756ead..6459fae 100644
+index fe6224b59..5fc3920c0 100644
 --- a/include/ghostty.h
 +++ b/include/ghostty.h
-@@ -961,6 +961,7 @@ typedef enum {
-   GHOSTTY_ACTION_READONLY,
+@@ -1019,6 +1019,7 @@ typedef enum {
    GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
    GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
+   GHOSTTY_ACTION_RESIZE_WINDOW,
 +  GHOSTTY_ACTION_OUTPUT_ACTIVITY,
  } ghostty_action_tag_e;
  
  typedef union {
-@@ -975,6 +976,7 @@ typedef union {
-   ghostty_action_initial_size_s initial_size;
+@@ -1034,6 +1035,7 @@ typedef union {
+   ghostty_action_resize_window_s resize_window;
    ghostty_action_cell_size_s cell_size;
    ghostty_action_scrollbar_s scrollbar;
 +  ghostty_action_scrollbar_s output_activity;
@@ -50,10 +50,10 @@ index a756ead..6459fae 100644
    ghostty_action_export_terminal_io_s export_terminal_io;
    ghostty_action_desktop_notification_s desktop_notification;
 diff --git a/macos/Sources/Ghostty/Ghostty.App.swift b/macos/Sources/Ghostty/Ghostty.App.swift
-index 1e02c8c..084f257 100644
+index 838b2b8da..fee323d15 100644
 --- a/macos/Sources/Ghostty/Ghostty.App.swift
 +++ b/macos/Sources/Ghostty/Ghostty.App.swift
-@@ -649,6 +649,10 @@ extension Ghostty {
+@@ -756,6 +756,10 @@ extension Ghostty {
              case GHOSTTY_ACTION_SCROLLBAR:
                  scrollbar(app, target: target, v: action.action.scrollbar)
  
@@ -65,10 +65,10 @@ index 1e02c8c..084f257 100644
                  closeAllWindows(app, target: target)
  
 diff --git a/src/Surface.zig b/src/Surface.zig
-index 28154da..a9dd4ab 100644
+index 44b79db37..977227c9e 100644
 --- a/src/Surface.zig
 +++ b/src/Surface.zig
-@@ -1105,6 +1105,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
+@@ -1124,6 +1124,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
  
          .scrollbar => |scrollbar| self.updateScrollbar(scrollbar),
  
@@ -77,7 +77,7 @@ index 28154da..a9dd4ab 100644
          .present_surface => try self.presentSurface(),
  
          .password_input => |v| try self.passwordInput(v),
-@@ -1722,6 +1724,22 @@ fn updateScrollbar(self: *Surface, scrollbar: terminal.Scrollbar) void {
+@@ -1753,6 +1755,22 @@ fn redraw(self: *Surface) void {
      };
  }
  
@@ -101,12 +101,12 @@ index 28154da..a9dd4ab 100644
  /// so that the apprt can reload the configuration.
  fn notifyConfigConditionalState(self: *Surface) void {
 diff --git a/src/apprt/action.zig b/src/apprt/action.zig
-index 24a8139..0706fda 100644
+index 54a8faf19..830c6be0a 100644
 --- a/src/apprt/action.zig
 +++ b/src/apprt/action.zig
-@@ -354,6 +354,16 @@ pub const Action = union(Key) {
-     /// Move a tab to a new window.
-     move_tab_to_new_window,
+@@ -364,6 +364,16 @@ pub const Action = union(Key) {
+     /// split or the window is fullscreen.
+     resize_window: ResizeWindow,
  
 +    /// A throttled heartbeat emitted from the IO path whenever the
 +    /// child/pty produces output. Unlike `scrollbar` (a renderer-track
@@ -121,19 +121,19 @@ index 24a8139..0706fda 100644
      /// Sync with: ghostty_action_tag_e
      pub const Key = enum(c_int) {
          quit,
-@@ -424,6 +434,7 @@ pub const Action = union(Key) {
-         readonly,
+@@ -436,6 +446,7 @@ pub const Action = union(Key) {
          copy_title_to_clipboard,
          move_tab_to_new_window,
+         resize_window,
 +        output_activity,
  
          test "ghostty.h Action.Key" {
              try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
 diff --git a/src/apprt/gtk/class/application.zig b/src/apprt/gtk/class/application.zig
-index 8cc5918..38ba090 100644
+index 80cc8bddc..631280080 100644
 --- a/src/apprt/gtk/class/application.zig
 +++ b/src/apprt/gtk/class/application.zig
-@@ -765,6 +765,9 @@ pub const Application = extern struct {
+@@ -775,6 +775,9 @@ pub const Application = extern struct {
              // GTK has no accessibility consumer for this yet.
              .selection_changed => {},
  
@@ -144,10 +144,10 @@ index 8cc5918..38ba090 100644
  
              .set_title => Action.setTitle(target, value),
 diff --git a/src/apprt/surface.zig b/src/apprt/surface.zig
-index 3cb0016..bd1a539 100644
+index 3b1a04d8a..16547e579 100644
 --- a/src/apprt/surface.zig
 +++ b/src/apprt/surface.zig
-@@ -102,6 +102,15 @@ pub const Message = union(enum) {
+@@ -151,6 +151,15 @@ pub const Message = union(enum) {
      /// The scrollbar state changed for the surface.
      scrollbar: terminal.Scrollbar,
  
@@ -164,7 +164,7 @@ index 3cb0016..bd1a539 100644
      search_total: ?usize,
  
 diff --git a/src/termio/Termio.zig b/src/termio/Termio.zig
-index 7d6e179..a2ff6eb 100644
+index d08f2e5ff..8abe243e8 100644
 --- a/src/termio/Termio.zig
 +++ b/src/termio/Termio.zig
 @@ -69,6 +69,12 @@ terminal_stream: StreamHandler.Stream,
@@ -180,7 +180,7 @@ index 7d6e179..a2ff6eb 100644
  /// State we have for thread enter. This may be null if we don't need
  /// to keep track of any state or if its already been freed.
  thread_enter_state: ?*ThreadEnterState = null,
-@@ -695,6 +701,37 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
+@@ -723,6 +729,37 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
          self.terminal_stream.nextSlice(buf);
      }
  
@@ -218,7 +218,7 @@ index 7d6e179..a2ff6eb 100644
      // If our stream handling caused messages to be sent to the mailbox
      // thread, then we need to wake it up so that it processes them.
      if (self.terminal_stream.handler.termio_messaged) {
-@@ -703,6 +740,37 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
+@@ -731,6 +768,37 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
      }
  }
  
@@ -254,8 +254,8 @@ index 7d6e179..a2ff6eb 100644
 +}
 +
  /// Sends a DSR response for the current color scheme to the pty.
- pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
-     self.renderer_state.mutex.lockUncancelable(global.io());
+ /// Record a Kitty clipboard protocol session grant so future requests
+ /// carrying the password skip the permission prompt.
 -- 
-2.43.0
+2.53.0
 

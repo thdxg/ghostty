@@ -184,6 +184,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         pub const ExportedFrame = if (@hasDecl(GraphicsAPI, "ExportedFrame")) GraphicsAPI.ExportedFrame else void;
 
+        /// Whether +Y is down in the coordinate space of exported
+        /// frames. Apprts use this to orient frames when presenting.
+        pub const custom_shader_y_is_down = GraphicsAPI.custom_shader_y_is_down;
+
         const Target = GraphicsAPI.Target;
         const Buffer = GraphicsAPI.Buffer;
         const Sampler = GraphicsAPI.Sampler;
@@ -335,6 +339,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
+
+        /// Health of how well the apprt can present our frames.
+        ///
+        /// This is separate from `health` because a renderer
+        /// can produce healthy frames that the apprt can't present.
+        presentation_health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
         /// True when we have a graphics context that can create GPU
         /// resources. Creating any GPU resource while this is false is invalid.
@@ -1635,6 +1645,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.syncDisplayLink(null, null);
         }
 
+        /// Called when the apprt reports a change in how well
+        /// frames can be presented.
+        pub fn setPresentationHealth(self: *Self, health: Health) void {
+            self.presentation_health.store(health, .seq_cst);
+        }
+
+        /// Returns how well frames can be presented.
+        pub fn presentationHealth(self: *Self) Health {
+            return self.presentation_health.load(.seq_cst);
+        }
+
         /// Callback when the window is visible or occluded.
         ///
         /// Must be called on the render thread.
@@ -1878,7 +1899,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // denormalization) is deferred to the endUpdate call
                 // outside of this critical section, keeping our lock
                 // hold time as short as possible.
-                try self.terminal_state.beginUpdate(
+                //
+                // Smooth scrolling captures the rows a shifted grid reveals
+                // as overscan; with it off this is a plain beginUpdate.
+                try self.terminal_state.beginShiftedUpdate(
                     self.alloc,
                     state.terminal,
                     self.viewportGeometry(),
@@ -3163,13 +3187,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ) Allocator.Error!void {
             const state: *terminal.RenderState = &self.terminal_state;
 
+            // The rows the grid holds: the viewport's, plus the ones smooth
+            // scrolling reveals beyond it (overscan), so the grid is laid
+            // from the first row captured. Without overscan this is exactly
+            // the viewport.
+            const captured = state.rowDataRange();
+            const captured_rows: terminal.size.CellCountInt =
+                @intCast(captured.end - captured.start);
+
             const grid_size_diff =
-                self.cells.size.rows != state.rows or
+                self.cells.size.rows != captured_rows or
                 self.cells.size.columns != state.cols;
 
             if (grid_size_diff) {
                 var new_size = self.cells.size;
-                new_size.rows = state.rows;
+                new_size.rows = captured_rows;
                 new_size.columns = state.cols;
                 try self.cells.resize(self.alloc, new_size);
 
@@ -3189,7 +3221,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // present the previous frame.
             const scroll_offset: [4]f32 = .{
                 @floatCast(state.viewport_pixel_offset),
-                @floatFromInt(state.rows_above),
+                @floatFromInt(state.overscan.above),
                 // The leftover height only counts while the grid is
                 // actually shifted onto it; at rest it stays padding.
                 if (state.viewport_pixel_offset != 0)
@@ -3229,20 +3261,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // working terminal state, even if incorrect.
             errdefer comptime unreachable;
 
-            // Get our row data from our state
+            // Get our row data from our state, the captured rows only:
+            // grid row y is row_data index captured.start + y.
             const row_data = state.row_data.slice();
-            const row_raws = row_data.items(.raw);
-            const row_cells = row_data.items(.cells);
-            const row_dirty = row_data.items(.dirty);
-            const row_selection = row_data.items(.selection);
-            const row_highlights = row_data.items(.highlights);
+            const row_raws = row_data.items(.raw)[captured.start..captured.end];
+            const row_cells = row_data.items(.cells)[captured.start..captured.end];
+            const row_dirty = row_data.items(.dirty)[captured.start..captured.end];
+            const row_selection = row_data.items(.selection)[captured.start..captured.end];
+            const row_highlights = row_data.items(.highlights)[captured.start..captured.end];
 
             // If our cell contents buffer is shorter than the screen viewport,
             // we render the rows that fit, starting from the bottom. If instead
             // the viewport is shorter than the cell contents buffer, we align
             // the top of the viewport with the top of the contents buffer.
             const row_len: usize = @min(
-                state.rows,
+                captured_rows,
                 self.cells.size.rows,
             );
 
@@ -3250,9 +3283,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // here because we will render the preedit separately.
             const preedit_range: ?PreeditRange = if (preedit) |preedit_v| preedit: {
                 // We base the preedit on the position of the cursor in the
-                // viewport. If the cursor isn't visible in the viewport we
-                // don't show it.
-                const cursor_vp = state.cursor.viewport orelse
+                // grid. If the cursor isn't in a row we draw we don't show
+                // it.
+                const cursor_vp = state.cursor.captured orelse
                     break :preedit null;
 
                 // If our preedit row isn't dirty then we don't need the
@@ -3319,13 +3352,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     std.math.maxInt(u16),
                 };
 
-                // If the cursor isn't visible on the viewport, don't show
-                // a cursor. Otherwise, get our cursor cell, because we may
-                // need it for styling.
-                const cursor_vp = state.cursor.viewport orelse break :cursor;
+                // If the cursor isn't in a row we draw, don't show a
+                // cursor. That counts a row smooth scrolling reveals beyond
+                // the viewport, which is drawn partly on screen. Otherwise,
+                // get our cursor cell, because we may need it for styling.
+                const cursor_vp = state.cursor.captured orelse break :cursor;
                 const cursor_style: terminal.Style = cursor_style: {
-                    const cells = state.row_data.items(.cells);
-                    const cell = cells[cursor_vp.y].get(cursor_vp.x);
+                    const cell = row_cells[cursor_vp.y].get(cursor_vp.x);
                     break :cursor_style if (cell.raw.hasStyling())
                         cell.style
                     else
@@ -3523,6 +3556,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 },
             }
 
+            // Links are found in viewport rows, and smooth scrolling can
+            // draw the viewport from a grid row below the first. A row
+            // revealed above the viewport has none.
+            const link_y: ?terminal.size.CellCountInt =
+                if (y >= state.overscan.above) y - state.overscan.above else null;
+
             // Iterator of runs for shaping.
             var run_iter_opts: font.shape.RunOptions = .{
                 .grid = self.font_grid,
@@ -3532,7 +3571,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // We want to do font shaping as long as the cursor is
                 // visible on this viewport.
                 .cursor_x = cursor_x: {
-                    const vp = state.cursor.viewport orelse break :cursor_x null;
+                    const vp = state.cursor.captured orelse break :cursor_x null;
                     if (vp.y != y) break :cursor_x null;
                     break :cursor_x vp.x;
                 },
@@ -3799,9 +3838,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // an underline, in which case use a double underline to
                 // distinguish them.
                 const underline: terminal.Attribute.Underline = underline: {
-                    if (links.contains(.{
+                    if (link_y != null and links.contains(.{
                         .x = @intCast(x),
-                        .y = @intCast(y),
+                        .y = link_y.?,
                     })) {
                         break :underline if (style.flags.underline == .single)
                             .double
@@ -4095,7 +4134,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cursor_style: renderer.CursorStyle,
             cursor_color: terminal.color.RGB,
         ) void {
-            const cursor_vp = cursor_state.viewport orelse return;
+            // In grid rows, which include any smooth scrolling reveals.
+            const cursor_vp = cursor_state.captured orelse return;
 
             // Add the cursor. We render the cursor over the wide character if
             // we're on the wide character tail.
