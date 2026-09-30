@@ -284,13 +284,15 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     log.debug("child process exited status={} runtime={}ms", .{ exit_code, runtime_ms });
 
     // We always notify the surface immediately that the child has
-    // exited and some metadata about the exit.
+    // exited and some metadata about the exit. Not forever: this runs on
+    // the IO thread, which the app thread joins on teardown without
+    // draining its mailbox (renderer.State.closing).
     _ = td.surface_mailbox.push(.{
         .child_exited = .{
             .exit_code = exit_code,
             .runtime_ms = runtime_ms,
         },
-    }, .{ .forever = {} });
+    }, .{ .abort = &td.renderer_state.closing });
 }
 
 fn processExit(
@@ -379,10 +381,13 @@ fn termiosTimer(
 
         // We have to notify the surface that we're in password input.
         // We must block on this because the balanced true/false state
-        // of this is critical to apprt behavior.
+        // of this is critical to apprt behavior. A surface being torn
+        // down is the exception: its apprt state goes with it, and the
+        // app thread that would drain this is waiting on our exit
+        // (renderer.State.closing).
         _ = td.surface_mailbox.push(.{
             .password_input = password_input,
-        }, .{ .forever = {} });
+        }, .{ .abort = &td.renderer_state.closing });
     }
 
     // Repeat the timer

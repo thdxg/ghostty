@@ -802,6 +802,11 @@ pub fn init(
 }
 
 pub fn deinit(self: *Surface) void {
+    // Tell producers on the threads joined below that their consumers are
+    // going away, so a mailbox push blocked on a full queue gives up rather
+    // than holding the join forever (see renderer.State.closing).
+    self.renderer_state.closing.store(true, .release);
+
     // Stop search thread
     if (self.search) |*s| s.deinit();
 

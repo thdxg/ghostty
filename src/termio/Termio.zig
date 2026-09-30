@@ -428,7 +428,7 @@ pub fn queueMessage(
     self.mailbox.send(msg, switch (mutex) {
         .locked => self.renderer_state.mutex,
         .unlocked => null,
-    });
+    }, &self.renderer_state.closing);
     self.mailbox.notify();
 }
 
@@ -534,8 +534,12 @@ pub fn resize(
         }
     }
 
-    // Mail the renderer so that it can update the GPU and re-render
-    _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
+    // Mail the renderer so that it can update the GPU and re-render. Not
+    // forever: the renderer thread is joined before this one on teardown,
+    // so a full queue then would never drain (renderer.State.closing).
+    _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{
+        .abort = &self.renderer_state.closing,
+    });
     self.renderer_wakeup.notify() catch {};
 }
 
