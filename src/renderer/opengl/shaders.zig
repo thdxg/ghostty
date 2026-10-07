@@ -218,6 +218,10 @@ pub const Uniforms = extern struct {
     ghost_rows: [max_ghost_rows][4]i32 align(16) = @splat(@splat(-1)),
     anim_counts: [4]u32 align(16) = @splat(0),
 
+    /// Smooth cursor; see the Metal `Uniforms`.
+    cursor_rect: [4]f32 align(16) = @splat(0),
+    cursor_fill: [4]u8 align(4) = @splat(0),
+
     pub const max_region_anims = 4;
     pub const max_ghost_rows = 64;
 
@@ -242,7 +246,12 @@ pub const Uniforms = extern struct {
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool = false,
 
-        _padding: u28 = 0,
+        /// Smooth cursor: color text as cursor text by how much of each
+        /// pixel `cursor_rect` covers, in place of the whole-cell recolor
+        /// under `cursor_pos`, which is then unset.
+        cursor_glide_text: bool = false,
+
+        _padding: u27 = 0,
     };
 
     const PaddingExtend = packed struct(u32) {

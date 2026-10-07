@@ -39,7 +39,33 @@ layout(binding = 1, std140) uniform Globals {
     uniform vec4 region_shift[4];
     uniform ivec4 ghost_rows[64];
     uniform uvec4 anim_counts;
+    // Smooth cursor: the rectangle the focused cursor fills, in grid
+    // pixels (left, top, width, height), filled with cursor_fill by the
+    // background shader; all zero while no cursor is drawn this way.
+    uniform vec4 cursor_rect;
+    uniform uint cursor_fill_packed_4u8;
 };
+
+// Smooth cursor: how much of the 1x1 pixel centered on grid pixel p lies
+// inside cursor_rect. Exact box coverage, so a resting cursor on whole
+// pixels is as hard-edged as the sprite it replaces and only an edge in
+// motion blends.
+float cursor_coverage(vec2 p) {
+    vec4 r = cursor_rect;
+    if (r.z <= 0.0 || r.w <= 0.0) return 0.0;
+    vec2 lo = r.xy;
+    vec2 hi = r.xy + r.zw;
+    vec2 c = clamp(min(hi, p + 0.5) - max(lo, p - 0.5), 0.0, 1.0);
+    return c.x * c.y;
+}
+
+// A drawn position back on the grid's pixels: minus the padding and the
+// smooth-scroll shift. A region scroll's shift stays in, as it is in
+// cursor_rect.
+vec2 grid_pixel(vec2 position) {
+    float shift_y = scroll_offset.x - scroll_offset.y * cell_size.y;
+    return position - grid_padding.wx - vec2(0.0, shift_y);
+}
 
 // The region scroll animation a grid cell takes part in, or -1. `pos` is
 // the cell's top-left in grid pixels, before any shift.
@@ -58,6 +84,9 @@ const uint CURSOR_WIDE = 1u;
 const uint USE_DISPLAY_P3 = 2u;
 const uint USE_LINEAR_BLENDING = 4u;
 const uint USE_LINEAR_CORRECTION = 8u;
+// Smooth cursor: color text as cursor text by cursor_rect's coverage (a
+// block cursor), in place of the whole-cell recolor under cursor_pos.
+const uint CURSOR_GLIDE_TEXT = 16u;
 
 // Padding extend enum
 const uint EXTEND_LEFT = 1u;

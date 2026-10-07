@@ -10,7 +10,11 @@ layout(binding = 1, std430) readonly buffer bg_cells {
     uint cells[];
 };
 
-vec4 cell_bg() {
+// The cell background under a fragment: the cell's own color, a region
+// scroll's shifted or ghost row, or the padding's extension of an edge.
+// `rel` is the fragment relative to the grid and `visible` the grid's
+// extent, both from cell_bg.
+vec4 cell_bg_base(vec2 rel, vec2 visible) {
     uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
 
@@ -21,13 +25,6 @@ vec4 cell_bg() {
     // decisions use this unshifted position; the cell lookup below then
     // applies the shift, so a partially revealed row never leaks into
     // the padding.
-    vec2 rel = gl_FragCoord.xy - grid_padding.wx;
-    float extra_rows = scroll_offset.x != 0.0 ? max(scroll_offset.y, 1.0) : 0.0;
-    vec2 visible = cell_size * vec2(float(grid_size.x), float(grid_size.y) - extra_rows);
-    // A shifted grid sits on the height its rows don't account for, so that
-    // strip is grid, not padding.
-    visible.y += scroll_offset.x != 0.0 ? scroll_offset.z : 0.0;
-
     vec4 bg = vec4(0.0);
 
     // Clamp x position, extends edge bg colors in to padding on sides.
@@ -100,6 +97,33 @@ vec4 cell_bg() {
         );
 
     return cell_color;
+}
+
+vec4 cell_bg() {
+    uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
+    bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
+
+    vec2 rel = gl_FragCoord.xy - grid_padding.wx;
+    float extra_rows = scroll_offset.x != 0.0 ? max(scroll_offset.y, 1.0) : 0.0;
+    vec2 visible = cell_size * vec2(float(grid_size.x), float(grid_size.y) - extra_rows);
+    // A shifted grid sits on the height its rows don't account for, so that
+    // strip is grid, not padding.
+    visible.y += scroll_offset.x != 0.0 ? scroll_offset.z : 0.0;
+
+    vec4 bg = cell_bg_base(rel, visible);
+
+    // Smooth cursor: the cursor fills its rect over the cell background,
+    // under the text, as far as it covers each pixel. Only inside the
+    // visible grid, so a cursor riding a scroll never paints the padding.
+    if (all(greaterThanEqual(rel, vec2(0.0))) && all(lessThan(rel, visible))) {
+        float cov = cursor_coverage(grid_pixel(gl_FragCoord.xy));
+        if (cov > 0.0) {
+            vec4 fill = load_color(unpack4u8(cursor_fill_packed_4u8), use_linear_blending);
+            bg = bg * (1.0 - fill.a * cov) + fill * cov;
+        }
+    }
+
+    return bg;
 }
 
 void main() {

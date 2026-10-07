@@ -54,6 +54,18 @@ void main() {
             // Our input color is always linear.
             vec4 color = in_data.color;
 
+            // Smooth cursor: a block cursor colors the glyph as cursor text
+            // by how much of this pixel it covers, so a glyph it is halfway
+            // across is two-toned. The invisible cursor sprite (alpha 0)
+            // stays so.
+            if ((bools & CURSOR_GLIDE_TEXT) != 0 && color.a > 0.0) {
+                float cov = cursor_coverage(grid_pixel(gl_FragCoord.xy));
+                if (cov > 0.0) {
+                    vec4 cursor_text = load_color(unpack4u8(cursor_color_packed_4u8), true);
+                    color = mix(color, cursor_text, cov);
+                }
+            }
+
             // If we're not doing linear blending, then we need to
             // re-apply the gamma encoding to our color manually.
             //
