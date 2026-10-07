@@ -265,6 +265,11 @@ pub const Uniforms = extern struct {
         /// with linear alpha blending have a similar apparent weight
         /// (thickness) to gamma-incorrect blending.
         use_linear_correction: bool align(1) = false,
+
+        /// Smooth cursor: color text as cursor text by how much of each
+        /// pixel `cursor_rect` covers (a block cursor), in place of the
+        /// whole-cell recolor under `cursor_pos`, which is then unset.
+        cursor_glide_text: bool align(1) = false,
     },
 
     /// Region scroll animation (alternate-screen scroll regions that a
@@ -280,6 +285,13 @@ pub const Uniforms = extern struct {
     region_shift: [max_region_anims][4]f32 align(16) = @splat(@splat(0)),
     ghost_rows: [max_ghost_rows][4]i32 align(16) = @splat(@splat(-1)),
     anim_counts: [4]u32 align(16) = @splat(0),
+
+    /// Smooth cursor (see `CursorGlide` in the renderer): the rect the
+    /// focused cursor fills, in grid pixels (left, top, width, height),
+    /// which the cell background shader fills with `cursor_fill`; all zero
+    /// while no cursor is drawn this way.
+    cursor_rect: [4]f32 align(16) = @splat(0),
+    cursor_fill: [4]u8 align(4) = @splat(0),
 
     pub const max_region_anims = 4;
     pub const max_ghost_rows = 64;

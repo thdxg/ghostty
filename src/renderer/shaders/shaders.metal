@@ -30,6 +30,10 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  // Smooth cursor: color text as cursor text by how much of each pixel
+  // cursor_rect covers (a block cursor), in place of the whole-cell
+  // recolor under cursor_pos, which is then unset.
+  bool cursor_glide_text;
   // Region scroll animation. region_rect[i] is an animating rectangle in
   // grid pixels (left, top, right, bottom); region_shift[i].x is how far
   // its content is currently drawn from its final place (positive: down).
@@ -40,7 +44,34 @@ struct Uniforms {
   float4 region_shift[4];
   int4 ghost_rows[64];
   uint4 anim_counts;
+  // Smooth cursor: the rectangle the focused cursor fills, in grid pixels
+  // (left, top, width, height), filled with cursor_fill by the background
+  // shader; all zero while no cursor is drawn this way.
+  float4 cursor_rect;
+  uchar4 cursor_fill;
 };
+
+// Smooth cursor: how much of the 1x1 pixel centered on grid pixel p lies
+// inside cursor_rect. Exact box coverage, so a resting cursor on whole
+// pixels is as hard-edged as the sprite it replaces and only an edge in
+// motion blends.
+float cursor_coverage(constant Uniforms& uniforms, float2 p) {
+  float4 r = uniforms.cursor_rect;
+  if (r.z <= 0.0 || r.w <= 0.0) return 0.0;
+  float2 lo = r.xy;
+  float2 hi = r.xy + r.zw;
+  float2 c = clamp(min(hi, p + 0.5) - max(lo, p - 0.5), 0.0, 1.0);
+  return c.x * c.y;
+}
+
+// A drawn position back on the grid's pixels: minus the padding and the
+// smooth-scroll shift. A region scroll's shift stays in, as it is in
+// cursor_rect.
+float2 grid_pixel(constant Uniforms& uniforms, float2 position) {
+  float shift_y = uniforms.scroll_offset.x -
+      uniforms.scroll_offset.y * uniforms.cell_size.y;
+  return position - uniforms.grid_padding.wx - float2(0.0, shift_y);
+}
 
 // The region scroll animation a grid cell takes part in, or -1. `pos` is
 // the cell's top-left in grid pixels, before any shift.
@@ -476,10 +507,15 @@ fragment float4 bg_image_fragment(
 //-------------------------------------------------------------------
 #pragma mark - Cell BG Shader
 
-fragment float4 cell_bg_fragment(
-  FullScreenVertexOut in [[stage_in]],
-  constant Uniforms& uniforms [[buffer(1)]],
-  constant uchar4 *cells [[buffer(2)]]
+// The cell background under a fragment: the cell's own color, a region
+// scroll's shifted or ghost row, or the padding's extension of an edge.
+// `rel` is the fragment relative to the grid and `visible` the grid's
+// extent, both from cell_bg_fragment.
+float4 cell_bg_base(
+  constant Uniforms& uniforms,
+  constant uchar4 *cells,
+  float2 rel,
+  float2 visible
 ) {
   // Position relative to the visible grid. Its extent comes from the
   // grid itself, not from grid_padding's bottom/right, which hold the
@@ -488,16 +524,6 @@ fragment float4 cell_bg_fragment(
   // decisions use this unshifted position; the cell lookup below then
   // applies the shift, so a partially revealed row never leaks into
   // the padding.
-  float2 rel = in.position.xy - uniforms.grid_padding.wx;
-  float extra_rows = uniforms.scroll_offset.x != 0.0
-      ? max(uniforms.scroll_offset.y, 1.0)
-      : 0.0;
-  float2 visible = uniforms.cell_size *
-      float2(uniforms.grid_size.x, float(uniforms.grid_size.y) - extra_rows);
-  // A shifted grid sits on the height its rows don't account for, so that
-  // strip is grid, not padding.
-  visible.y += uniforms.scroll_offset.x != 0.0 ? uniforms.scroll_offset.z : 0.0;
-
   float4 bg = float4(0.0);
 
   // Clamp x position, extends edge bg colors in to padding on sides.
@@ -581,6 +607,41 @@ fragment float4 cell_bg_fragment(
     uniforms.use_display_p3,
     uniforms.use_linear_blending
   );
+}
+
+fragment float4 cell_bg_fragment(
+  FullScreenVertexOut in [[stage_in]],
+  constant Uniforms& uniforms [[buffer(1)]],
+  constant uchar4 *cells [[buffer(2)]]
+) {
+  float2 rel = in.position.xy - uniforms.grid_padding.wx;
+  float extra_rows = uniforms.scroll_offset.x != 0.0
+      ? max(uniforms.scroll_offset.y, 1.0)
+      : 0.0;
+  float2 visible = uniforms.cell_size *
+      float2(uniforms.grid_size.x, float(uniforms.grid_size.y) - extra_rows);
+  // A shifted grid sits on the height its rows don't account for, so that
+  // strip is grid, not padding.
+  visible.y += uniforms.scroll_offset.x != 0.0 ? uniforms.scroll_offset.z : 0.0;
+
+  float4 bg = cell_bg_base(uniforms, cells, rel, visible);
+
+  // Smooth cursor: the cursor fills its rect over the cell background,
+  // under the text, as far as it covers each pixel. Only inside the
+  // visible grid, so a cursor riding a scroll never paints the padding.
+  if (all(rel >= 0.0) && all(rel < visible)) {
+    float cov = cursor_coverage(uniforms, grid_pixel(uniforms, in.position.xy));
+    if (cov > 0.0) {
+      float4 fill = load_color(
+        uniforms.cursor_fill,
+        uniforms.use_display_p3,
+        uniforms.use_linear_blending
+      );
+      bg = bg * (1.0 - fill.a * cov) + fill * cov;
+    }
+  }
+
+  return bg;
 }
 
 //-------------------------------------------------------------------
@@ -819,6 +880,21 @@ fragment float4 cell_text_fragment(
     case ATLAS_GRAYSCALE: {
       // Our input color is always linear.
       float4 color = in.color;
+
+      // Smooth cursor: a block cursor colors the glyph as cursor text by
+      // how much of this pixel it covers, so a glyph it is halfway across
+      // is two-toned. The invisible cursor sprite (alpha 0) stays so.
+      if (uniforms.cursor_glide_text && color.a > 0.0) {
+        float cov = cursor_coverage(uniforms, grid_pixel(uniforms, in.position.xy));
+        if (cov > 0.0) {
+          float4 cursor_text = load_color(
+            uniforms.cursor_color,
+            uniforms.use_display_p3,
+            true
+          );
+          color = mix(color, cursor_text, cov);
+        }
+      }
 
       // If we're not doing linear blending, then we need to
       // re-apply the gamma encoding to our color manually.
