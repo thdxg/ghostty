@@ -60,6 +60,7 @@ env:
     .github/downstream/0006-custom-shader-cursor-hidden-offscreen.patch
     .github/downstream/0007-teardown-mailbox-push-abort.patch
     .github/downstream/0008-smooth-cursor.patch
+    .github/downstream/0009-cursor-trail.patch
   # How far behind upstream HEAD the fork's base may fall before the sync is
   # presumed broken. A daily sync should keep this at 0–1 days.
   MAX_AGE_DAYS: "4"

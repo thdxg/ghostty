@@ -293,6 +293,13 @@ pub const Uniforms = extern struct {
     cursor_rect: [4]f32 align(16) = @splat(0),
     cursor_fill: [4]u8 align(4) = @splat(0),
 
+    /// Cursor trail (`CursorGlide.Trail`): the streak's segment, as the
+    /// centers it is swept between in grid pixels (from.xy, to.xy), and
+    /// its half size (.xy) and opacity (.z); opacity 0 while there is none.
+    /// Drawn by the cell background shader in `cursor_fill`'s color.
+    cursor_trail: [4]f32 align(16) = @splat(0),
+    cursor_trail_size: [4]f32 align(16) = @splat(0),
+
     pub const max_region_anims = 4;
     pub const max_ghost_rows = 64;
 

@@ -44,7 +44,28 @@ layout(binding = 1, std140) uniform Globals {
     // background shader; all zero while no cursor is drawn this way.
     uniform vec4 cursor_rect;
     uniform uint cursor_fill_packed_4u8;
+    // Cursor trail: the streak's segment as the centers it is swept
+    // between in grid pixels (from.xy, to.xy), and its half size (.xy)
+    // and opacity (.z); opacity 0 while there is none.
+    uniform vec4 cursor_trail;
+    uniform vec4 cursor_trail_size;
 };
+
+// Cursor trail: the streak's opacity at grid pixel p. An axis-aligned box
+// of the trail's half size swept along its segment (it slides rather than
+// rotates, so a diagonal move leaves a slanted streak with square ends),
+// with a one-pixel antialiased edge, times the streak's opacity.
+float trail_coverage(vec2 p) {
+    vec4 s = cursor_trail_size;
+    if (s.z <= 0.0) return 0.0;
+    vec2 a = cursor_trail.xy;
+    vec2 b = cursor_trail.zw;
+    vec2 ab = b - a;
+    float h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+    vec2 d = abs(p - (a + ab * h)) - s.xy;
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+    return (1.0 - smoothstep(0.0, 1.0, dist)) * s.z;
+}
 
 // Smooth cursor: how much of the 1x1 pixel centered on grid pixel p lies
 // inside cursor_rect. Exact box coverage, so a resting cursor on whole

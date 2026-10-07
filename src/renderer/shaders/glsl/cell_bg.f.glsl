@@ -112,11 +112,19 @@ vec4 cell_bg() {
 
     vec4 bg = cell_bg_base(rel, visible);
 
-    // Smooth cursor: the cursor fills its rect over the cell background,
-    // under the text, as far as it covers each pixel. Only inside the
-    // visible grid, so a cursor riding a scroll never paints the padding.
+    // Cursor trail and smooth cursor: the streak behind the cursor, then
+    // the cursor filling its rect over it, both over the cell background
+    // and under the text, each as far as it covers the pixel. Only inside
+    // the visible grid, so neither paints the padding while riding a scroll.
     if (all(greaterThanEqual(rel, vec2(0.0))) && all(lessThan(rel, visible))) {
-        float cov = cursor_coverage(grid_pixel(gl_FragCoord.xy));
+        vec2 p = grid_pixel(gl_FragCoord.xy);
+        float trail = trail_coverage(p);
+        if (trail > 0.0) {
+            uvec4 fill_u = unpack4u8(cursor_fill_packed_4u8);
+            vec4 streak = load_color(uvec4(fill_u.rgb, 255u), use_linear_blending);
+            bg = bg * (1.0 - trail) + streak * trail;
+        }
+        float cov = cursor_coverage(p);
         if (cov > 0.0) {
             vec4 fill = load_color(unpack4u8(cursor_fill_packed_4u8), use_linear_blending);
             bg = bg * (1.0 - fill.a * cov) + fill * cov;

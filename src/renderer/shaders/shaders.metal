@@ -49,7 +49,28 @@ struct Uniforms {
   // shader; all zero while no cursor is drawn this way.
   float4 cursor_rect;
   uchar4 cursor_fill;
+  // Cursor trail: the streak's segment as the centers it is swept between
+  // in grid pixels (from.xy, to.xy), and its half size (.xy) and opacity
+  // (.z); opacity 0 while there is none. Drawn in cursor_fill's color.
+  float4 cursor_trail;
+  float4 cursor_trail_size;
 };
+
+// Cursor trail: the streak's opacity at grid pixel p. An axis-aligned box
+// of the trail's half size swept along its segment (it slides rather than
+// rotates, so a diagonal move leaves a slanted streak with square ends),
+// with a one-pixel antialiased edge, times the streak's opacity.
+float trail_coverage(constant Uniforms& uniforms, float2 p) {
+  float4 s = uniforms.cursor_trail_size;
+  if (s.z <= 0.0) return 0.0;
+  float2 a = uniforms.cursor_trail.xy;
+  float2 b = uniforms.cursor_trail.zw;
+  float2 ab = b - a;
+  float h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+  float2 d = abs(p - (a + ab * h)) - s.xy;
+  float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+  return (1.0 - smoothstep(0.0, 1.0, dist)) * s.z;
+}
 
 // Smooth cursor: how much of the 1x1 pixel centered on grid pixel p lies
 // inside cursor_rect. Exact box coverage, so a resting cursor on whole
@@ -626,11 +647,22 @@ fragment float4 cell_bg_fragment(
 
   float4 bg = cell_bg_base(uniforms, cells, rel, visible);
 
-  // Smooth cursor: the cursor fills its rect over the cell background,
-  // under the text, as far as it covers each pixel. Only inside the
-  // visible grid, so a cursor riding a scroll never paints the padding.
+  // Cursor trail and smooth cursor: the streak behind the cursor, then
+  // the cursor filling its rect over it, both over the cell background
+  // and under the text, each as far as it covers the pixel. Only inside
+  // the visible grid, so neither paints the padding while riding a scroll.
   if (all(rel >= 0.0) && all(rel < visible)) {
-    float cov = cursor_coverage(uniforms, grid_pixel(uniforms, in.position.xy));
+    float2 p = grid_pixel(uniforms, in.position.xy);
+    float trail = trail_coverage(uniforms, p);
+    if (trail > 0.0) {
+      float4 streak = load_color(
+        uchar4(uniforms.cursor_fill.rgb, 255),
+        uniforms.use_display_p3,
+        uniforms.use_linear_blending
+      );
+      bg = bg * (1.0 - trail) + streak * trail;
+    }
+    float cov = cursor_coverage(uniforms, p);
     if (cov > 0.0) {
       float4 fill = load_color(
         uniforms.cursor_fill,
