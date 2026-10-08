@@ -104,7 +104,7 @@ vec4 cell_bg() {
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
 
     vec2 rel = gl_FragCoord.xy - grid_padding.wx;
-    float extra_rows = scroll_offset.x != 0.0 ? max(scroll_offset.y, 1.0) : 0.0;
+    float extra_rows = scroll_offset.x != 0.0 ? max(scroll_offset.y + scroll_offset.w, 1.0) : 0.0;
     vec2 visible = cell_size * vec2(float(grid_size.x), float(grid_size.y) - extra_rows);
     // A shifted grid sits on the height its rows don't account for, so that
     // strip is grid, not padding.

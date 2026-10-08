@@ -1018,6 +1018,18 @@ palette: Palette = .{},
 /// This can be changed at runtime.
 @"smooth-scroll": bool = false,
 
+/// With `smooth-scroll` on, move the scrollback viewport by whole rows and
+/// animate each move, instead of following a precision gesture pixel for
+/// pixel. Scroll input accumulates exactly as it does without smooth
+/// scrolling and commits a row at a time; every row the viewport moves is
+/// drawn sliding in from where it was, easing home in about a quarter
+/// second as a region scroll on the alternate screen does. So the viewport
+/// never comes to rest between rows, and a discrete wheel animates too.
+///
+/// Downstream (thdxg/ghostty) key, read by Macterm's Animations settings.
+/// This can be changed at runtime.
+@"smooth-scroll-rows": bool = false,
+
 /// Move the cursor to where the terminal puts it instead of redrawing it
 /// there. The focused block, bar or underline cursor glides from its last
 /// place to the new one over about 140 ms, and a block cursor on its way
