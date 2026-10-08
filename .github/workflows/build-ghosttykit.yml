@@ -12,8 +12,51 @@ on:
       - 'build.zig.zon'
       - 'build.zig.zon.json'
 
+# One build at a time, in the order they were pushed: a build that finished
+# after a newer one would otherwise publish last and be marked latest. A queued
+# run of the same commit then finds its release already there and skips.
+concurrency:
+  group: build-ghosttykit
+  cancel-in-progress: false
+
 jobs:
+  # The release tag is a function of the commit alone —
+  # build-<commit date, UTC>-<short sha> — so two builds on one day can't share
+  # a name, and a tag, once published, always names the same bytes. The old
+  # build-<today> tag was deleted and re-cut by a second build the same day,
+  # silently changing what Macterm's pin pointed at.
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      date: ${{ steps.tag.outputs.date }}
+      exists: ${{ steps.tag.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          DATE=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%d HEAD)
+          TAG="build-${DATE}-$(git rev-parse --short=7 HEAD)"
+          # A published release is never replaced. Its tag existing means this
+          # exact commit was already built; check the tag rather than the
+          # release, which a run that died mid-upload can leave as a draft.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            EXISTS=true
+            echo "::notice::$TAG is already released; skipping the build"
+          else
+            EXISTS=false
+          fi
+          {
+            echo "tag=$TAG"
+            echo "date=$DATE"
+            echo "exists=$EXISTS"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: tag
+    if: needs.tag.outputs.exists == 'false'
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -75,19 +118,14 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_DATE: ${{ github.run_id }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          DATE: ${{ needs.tag.outputs.date }}
         run: |
-          TAG="build-$(date -u +%Y-%m-%d)"
-          COMMIT=$(git rev-parse --short HEAD)
-
-          if gh release view "$TAG" &> /dev/null; then
-            gh release delete "$TAG" --yes
-            git push --delete origin "$TAG" 2>/dev/null || true
-          fi
-
+          COMMIT=$(git rev-parse --short=7 HEAD)
           gh release create "$TAG" \
-            --title "GhosttyKit $(date -u +%Y-%m-%d)" \
+            --target "$GITHUB_SHA" \
+            --title "GhosttyKit $DATE ($COMMIT)" \
             --latest \
-            --notes "Built from commit ${COMMIT} on $(date -u +%Y-%m-%d)" \
+            --notes "Built from commit ${GITHUB_SHA} (committed $DATE)." \
             macos/GhosttyKit.xcframework.tar.gz \
             ghostty-resources.tar.gz
