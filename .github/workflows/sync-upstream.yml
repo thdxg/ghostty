@@ -51,6 +51,7 @@ env:
     .github/downstream/0008-smooth-cursor.patch
     .github/downstream/0009-cursor-trail.patch
     .github/downstream/0010-resize-coalesce-tracks-frames.patch
+    .github/downstream/0011-smooth-scroll-rows.patch
 
 jobs:
   sync:
