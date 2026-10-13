@@ -512,6 +512,17 @@ pub const Surface = struct {
         /// (e.g. a script runner that emits its own OSC sequences) and must not
         /// have Ghostty's integration injected into the shell.
         disable_shell_integration: bool = false,
+
+        /// The size of the view in pixels at creation, when the host already
+        /// knows it. Zero keeps the 800x600 placeholder that the host replaces
+        /// with its first `ghostty_surface_set_size`. The pty opens at the
+        /// size the surface has here, so a program that reads its window
+        /// size at startup (a session multiplexer's attach client, anything
+        /// that calls TIOCGWINSZ once) sees the placeholder grid when the host
+        /// reports the real size a moment later. That later resize is a race
+        /// with the child's startup, and under launch load the child wins.
+        initial_width_px: u32 = 0,
+        initial_height_px: u32 = 0,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -524,7 +535,10 @@ pub const Surface = struct {
                 .x = @floatCast(opts.scale_factor),
                 .y = @floatCast(opts.scale_factor),
             },
-            .size = .{ .width = 800, .height = 600 },
+            .size = if (opts.initial_width_px > 0 and opts.initial_height_px > 0)
+                .{ .width = opts.initial_width_px, .height = opts.initial_height_px }
+            else
+                .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
         };
 

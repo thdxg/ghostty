@@ -521,6 +521,8 @@ typedef struct {
   const char* const* command_wrapper;
   size_t command_wrapper_count;
   bool disable_shell_integration;
+  uint32_t initial_width_px;
+  uint32_t initial_height_px;
 } ghostty_surface_config_s;
 
 typedef struct {
