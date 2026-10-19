@@ -93,10 +93,12 @@ jobs:
       # The fork's Test workflow is off (upstream's matrix is not ours), so
       # the unit tests of the downstream patches run here, before the build,
       # filtered to their names. A failure publishes nothing. "Selection"
-      # covers patch 0013 (Selection.move, expandToLines); "parse:" covers
-      # the keybind parser, which every new binding action goes through.
+      # covers patch 0013 (Selection.move, expandToLines); "selection head"
+      # covers patch 0014 (the render state's cursor on the selection head);
+      # "parse:" covers the keybind parser, which every new binding action
+      # goes through.
       - name: Test downstream patches
-        run: zig build test -Dsentry=false -Dtest-filter=Selection -Dtest-filter="parse:"
+        run: zig build test -Dsentry=false -Dtest-filter=Selection -Dtest-filter="selection head" -Dtest-filter="parse:"
 
       - name: Build xcframework
         run: zig build -Doptimize=ReleaseFast -Dsentry=false -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true

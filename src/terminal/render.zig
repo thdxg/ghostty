@@ -596,6 +596,15 @@ pub const RenderState = struct {
         const s: *Screen = t.screens.active;
         const viewport_pin = s.pages.getTopLeft(.viewport);
 
+        // The cell the cursor is drawn on. A keyboard copy mode draws it
+        // on the head of the selection (`Terminal.flags.selection_cursor`),
+        // not on the pty's cursor, which stays where the program left it.
+        const cursor_on_selection = t.flags.selection_cursor and s.selection != null;
+        const cursor_pin: PageList.Pin = if (cursor_on_selection)
+            s.selection.?.end()
+        else
+            s.cursor.page_pin.*;
+
         // The overscan rows to capture beyond the viewport. The request
         // decides the layout of row_data, and the actual counts are
         // limited to the rows that exist. With no request, everything
@@ -681,12 +690,21 @@ pub const RenderState = struct {
         self.cols = s.pages.cols;
         self.viewport_pin = viewport_pin;
         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
-        self.cursor.cell = s.cursor.page_cell.*;
+        self.cursor.cell = cursor_pin.rowAndCell().cell.*;
         self.cursor.style = s.cursor.style;
-        self.cursor.visual_style = s.cursor.cursor_style;
         self.cursor.password_input = t.flags.password_input;
-        self.cursor.visible = t.modes.get(.cursor_visible);
-        self.cursor.blinking = t.modes.get(.cursor_blinking);
+        if (cursor_on_selection) {
+            // The copy-mode cursor is a steady block whatever the program
+            // asked for its own cursor, and it shows while the program
+            // hides its own (a pager at a prompt hides it).
+            self.cursor.visual_style = .block;
+            self.cursor.visible = true;
+            self.cursor.blinking = false;
+        } else {
+            self.cursor.visual_style = s.cursor.cursor_style;
+            self.cursor.visible = t.modes.get(.cursor_visible);
+            self.cursor.blinking = t.modes.get(.cursor_blinking);
+        }
 
         // Always reset the cursor viewport position. In the future we can
         // probably cache this by comparing the cursor pin and viewport pin
@@ -821,19 +839,19 @@ pub const RenderState = struct {
             // if rows are not dirty because the cursor is unrelated. We
             // can check the chunk bounds once rather than every row.
             if (self.cursor.captured == null and
-                node == s.cursor.page_pin.node)
+                node == cursor_pin.node)
             cursor: {
-                const cy = s.cursor.page_pin.y;
+                const cy = cursor_pin.y;
                 if (cy < chunk.start or cy >= chunk.start + take) break :cursor;
 
                 const idx = y + (cy - chunk.start);
-                const wide_tail = if (s.cursor.x > 0)
-                    s.cursorCellLeft(1).wide == .wide
+                const wide_tail = if (cursor_pin.x > 0)
+                    cursor_pin.left(1).rowAndCell().cell.wide == .wide
                 else
                     false;
                 self.cursor.captured = .{
                     .y = @intCast(idx - first),
-                    .x = s.cursor.x,
+                    .x = cursor_pin.x,
                     .wide_tail = wide_tail,
                 };
 
@@ -843,7 +861,7 @@ pub const RenderState = struct {
                 if (idx < vp_start or idx >= vp_start + self.rows) break :cursor;
                 self.cursor.viewport = .{
                     .y = @intCast(idx - vp_start),
-                    .x = s.cursor.x,
+                    .x = cursor_pin.x,
 
                     // Future: we should use our own state here to look this
                     // up rather than calling this.
@@ -948,6 +966,12 @@ pub const RenderState = struct {
         // we can cache.
         if (s.selection) |*sel| selection: {
             @branchHint(.unlikely);
+
+            // A one-cell selection under the copy-mode cursor is that
+            // cursor: the cell draws as a cursor and not as a highlight, as
+            // in Helix. The rows were rebuilt with no selection (a change of
+            // the selection dirties the screen), so nothing stays marked.
+            if (cursor_on_selection and sel.start().eql(sel.end())) break :selection;
 
             // Populate our selection cache to avoid some expensive
             // recalculation.
@@ -2626,6 +2650,69 @@ test "cursor state out of viewport" {
     try testing.expectEqual(0, state.cursor.active.x);
     try testing.expectEqual(1, state.cursor.active.y);
     try testing.expect(state.cursor.viewport == null);
+}
+
+test "cursor on the selection head" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{
+        .cols = 10,
+        .rows = 5,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // Two rows, and the program hides its cursor, as a pager does.
+    s.nextSlice("ABCDE\r\nFGHIJ\x1b[?25l");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+
+    // Without the flag the pty cursor is the cursor, hidden.
+    try state.update(alloc, &t);
+    try testing.expect(!state.cursor.visible);
+    try testing.expectEqual(5, state.cursor.viewport.?.x);
+    try testing.expectEqual(1, state.cursor.viewport.?.y);
+
+    // A one-cell selection on B with the flag: the cursor is there, shown,
+    // a block, and the cell is not highlighted.
+    const screen = t.screens.active;
+    const b = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    try screen.select(Selection.init(b, b, false));
+    t.flags.selection_cursor = true;
+    try state.update(alloc, &t);
+    try testing.expect(state.cursor.visible);
+    try testing.expect(!state.cursor.blinking);
+    try testing.expectEqual(cursor.Style.block, state.cursor.visual_style);
+    try testing.expectEqual(1, state.cursor.viewport.?.x);
+    try testing.expectEqual(0, state.cursor.viewport.?.y);
+    try testing.expectEqual('B', state.cursor.cell.codepoint());
+    {
+        const sels = state.row_data.slice().items(.selection);
+        try testing.expectEqual(null, sels[state.rowDataRange().start]);
+    }
+
+    // The selection grows to C: the head is the cursor, the row is marked.
+    const c = screen.pages.pin(.{ .screen = .{ .x = 2, .y = 0 } }).?;
+    try screen.select(Selection.init(b, c, false));
+    try state.update(alloc, &t);
+    try testing.expectEqual(2, state.cursor.viewport.?.x);
+    try testing.expectEqual('C', state.cursor.cell.codepoint());
+    {
+        const sels = state.row_data.slice().items(.selection);
+        try testing.expectEqualSlices(size.CellCountInt, &.{ 1, 2 }, &sels[state.rowDataRange().start].?);
+    }
+
+    // The flag off: the pty cursor again, still hidden.
+    t.flags.selection_cursor = false;
+    screen.dirty.selection = true;
+    try state.update(alloc, &t);
+    try testing.expect(!state.cursor.visible);
+    try testing.expectEqual(5, state.cursor.viewport.?.x);
+    try testing.expectEqual(1, state.cursor.viewport.?.y);
 }
 
 test "dirty state" {

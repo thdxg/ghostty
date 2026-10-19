@@ -560,6 +560,15 @@ pub const Action = union(enum) {
     /// Clear the selection. Does nothing when there is no selection.
     clear_selection,
 
+    /// Draw the cursor on the head of the selection (`on`), or on the
+    /// cursor of the program again (`off`). While it is on, the cursor is
+    /// a steady block on the head, shown even while the program hides its
+    /// own cursor, and a one-cell selection draws as that cursor alone, as
+    /// in Helix. The cursor of the program does not move. This is the
+    /// cursor of a keyboard copy mode. Does nothing when the state is
+    /// already the one asked for.
+    selection_cursor: SelectionCursor,
+
     /// Jump the viewport forward or back by the given number of prompts.
     ///
     /// Requires shell integration.
@@ -1102,6 +1111,11 @@ pub const Action = union(enum) {
         end_of_line,
     };
 
+    pub const SelectionCursor = enum {
+        on,
+        off,
+    };
+
     pub const SelectionMotion = enum {
         left,
         right,
@@ -1492,6 +1506,7 @@ pub const Action = union(enum) {
             .flip_selection,
             .select_line,
             .clear_selection,
+            .selection_cursor,
             .jump_to_prompt,
             .write_scrollback_file,
             .write_screen_file,
@@ -4741,6 +4756,15 @@ test "parse: move_selection and extend_selection" {
     try testing.expectError(Error.InvalidFormat, parseSingle(
         "a=move_selection:sideways",
     ));
+}
+
+test "parse: selection_cursor" {
+    const testing = std.testing;
+
+    const binding = try parseSingle("a=selection_cursor:on");
+    try testing.expect(binding.action == .selection_cursor);
+    try testing.expectEqual(Action.SelectionCursor.on, binding.action.selection_cursor);
+    try testing.expectError(Error.InvalidFormat, parseSingle("a=selection_cursor:maybe"));
 }
 
 test "parse: selection actions without a parameter" {

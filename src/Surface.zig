@@ -6055,6 +6055,21 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             try self.setSelection(null);
             try self.queueRender();
         },
+
+        .selection_cursor => |v| {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            const t = &self.io.terminal;
+            const on = v == .on;
+            if (t.flags.selection_cursor == on) return false;
+            t.flags.selection_cursor = on;
+            // The cursor moves between the program's cursor and the head
+            // of the selection. The render state rebuilds on the selection
+            // dirty bit, as it does for any change of the selection.
+            t.screens.active.dirty.selection = true;
+            try self.queueRender();
+        },
     }
 
     return true;

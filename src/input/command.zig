@@ -746,6 +746,7 @@ fn actionCommands(action: Action.Key) []const Command {
         .flip_selection,
         .select_line,
         .clear_selection,
+        .selection_cursor,
         => comptime &.{},
 
         // No commands because I'm not sure they make sense in a command
