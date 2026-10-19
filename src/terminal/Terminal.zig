@@ -147,6 +147,13 @@ flags: packed struct {
     /// to true based on termios state.
     password_input: bool = false,
 
+    /// True while a keyboard copy mode owns the cursor. The render state
+    /// then draws the cursor on the head (`end`) of the selection, visible
+    /// and as a block, and not on this cursor, which stays where the
+    /// program left it. A one-cell selection draws as that cursor alone.
+    /// Set by the `selection_cursor` binding action.
+    selection_cursor: bool = false,
+
     /// True if the terminal should perform selection scrolling.
     selection_scroll: bool = false,
 
