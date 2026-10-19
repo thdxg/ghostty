@@ -90,6 +90,14 @@ jobs:
       # upstream build flag (src/build/Config.zig), and src/crash/sentry.zig
       # gates even the `@import("sentry")` on it, so the library is not linked
       # at all rather than merely left dormant.
+      # The fork's Test workflow is off (upstream's matrix is not ours), so
+      # the unit tests of the downstream patches run here, before the build,
+      # filtered to their names. A failure publishes nothing. "Selection"
+      # covers patch 0013 (Selection.move, expandToLines); "parse:" covers
+      # the keybind parser, which every new binding action goes through.
+      - name: Test downstream patches
+        run: zig build test -Dsentry=false -Dtest-filter=Selection -Dtest-filter="parse:"
+
       - name: Build xcframework
         run: zig build -Doptimize=ReleaseFast -Dsentry=false -Demit-xcframework=true -Dxcframework-target=universal -Demit-macos-app=false -Demit-themes=true
 
