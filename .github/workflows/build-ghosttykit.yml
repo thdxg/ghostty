@@ -123,9 +123,14 @@ jobs:
         run: |
           tar czf ghostty-resources.tar.gz -C zig-out/share ghostty terminfo
 
+      # GH_PAT, not GITHUB_TOKEN: since GitHub paused and re-enabled the
+      # workflows of this fork (2026-10-19), the job token is read-only
+      # whatever `permissions:` says — `gh release create` got HTTP 403
+      # "Resource not accessible by integration" twice. The sync already
+      # pushes with the same PAT.
       - name: Create release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ needs.tag.outputs.tag }}
           DATE: ${{ needs.tag.outputs.date }}
         run: |
