@@ -5974,9 +5974,125 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             screen.dirty.selection = true;
             try self.queueRender();
         },
+
+        .start_selection => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            if (try self.selectCursorIfNone()) try self.queueRender();
+        },
+
+        .move_selection => |motion| try self.moveSelection(motion, false),
+        .extend_selection => |motion| try self.moveSelection(motion, true),
+
+        .collapse_selection => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const sel = if (screen.selection) |*sel| sel else return false;
+            sel.startPtr().* = sel.end();
+            screen.dirty.selection = true;
+            try self.queueRender();
+        },
+
+        .flip_selection => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const sel = if (screen.selection) |*sel| sel else return false;
+            const anchor = sel.start();
+            sel.startPtr().* = sel.end();
+            sel.endPtr().* = anchor;
+            screen.dirty.selection = true;
+            try self.queueRender();
+        },
+
+        .select_line => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            _ = try self.selectCursorIfNone();
+            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const sel = if (screen.selection) |*sel| sel else return false;
+            sel.expandToLines(screen);
+            scrollToSelectionHead(screen, sel);
+            screen.dirty.selection = true;
+            try self.queueRender();
+        },
+
+        .clear_selection => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            if (self.io.terminal.screens.active.selection == null) return false;
+            try self.setSelection(null);
+            try self.queueRender();
+        },
     }
 
     return true;
+}
+
+/// Give the active screen a one-cell selection at the terminal cursor if it
+/// has none. Returns true if it made one. The renderer mutex must be held.
+fn selectCursorIfNone(self: *Surface) !bool {
+    const screen: *terminal.Screen = self.io.terminal.screens.active;
+    if (screen.selection != null) return false;
+    const pin = screen.cursor.page_pin.*;
+    try self.setSelection(terminal.Selection.init(pin, pin, false));
+    return true;
+}
+
+/// `move_selection` and `extend_selection`: see `terminal.Selection.move`.
+fn moveSelection(
+    self: *Surface,
+    motion: input.Binding.Action.SelectionMotion,
+    extend: bool,
+) !void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    _ = try self.selectCursorIfNone();
+    const screen: *terminal.Screen = self.io.terminal.screens.active;
+    const sel = if (screen.selection) |*sel| sel else return;
+    sel.move(screen, switch (motion) {
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+        .word_next => .word_next,
+        .word_end => .word_end,
+        .word_prev => .word_prev,
+        .line_start => .line_start,
+        .line_end => .line_end,
+        .page_up => .page_up,
+        .page_down => .page_down,
+        .half_page_up => .half_page_up,
+        .half_page_down => .half_page_down,
+        .top => .top,
+        .bottom => .bottom,
+    }, extend, self.config.selection_word_chars);
+    scrollToSelectionHead(screen, sel);
+    screen.dirty.selection = true;
+    try self.queueRender();
+}
+
+/// Scroll the viewport so the selection head (`end`) is in it, the way
+/// `adjust_selection` follows its end. The renderer mutex must be held.
+fn scrollToSelectionHead(screen: *terminal.Screen, sel: *terminal.Selection) void {
+    const viewport_tl = screen.pages.getTopLeft(.viewport);
+    const viewport_br = screen.pages.getBottomRight(.viewport).?;
+    if (sel.end().isBetween(viewport_tl, viewport_br)) return;
+
+    // A head above the viewport goes to its top row, a head below it to
+    // its bottom row.
+    const target = if (sel.end().before(viewport_tl))
+        sel.end()
+    else
+        sel.end().up(screen.pages.rows - 1) orelse sel.end();
+    screen.scroll(.{ .pin = target });
 }
 
 /// Returns true if performing the given action result in closing
