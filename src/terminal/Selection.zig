@@ -727,8 +727,21 @@ const WordWalker = struct {
 /// Helix `w`: the cell before the start of the next word. From inside a word
 /// this is the last blank after it, so the selection covers the word and the
 /// blanks that follow it. With no next word the head stays.
+///
+/// When the head is the last cell before a word (the cell that a `w` leaves
+/// it on, the end of a word with a boundary run after it, or the end of a row
+/// with a word at the start of the next row), the walk starts on that word,
+/// as in Helix. Without this a repeated `w` would not move.
 fn wordNext(pin: Pin, boundary_codepoints: []const u21) Pin {
     var w = WordWalker.init(pin, boundary_codepoints);
+    const head_class = w.class();
+    var next = w;
+    if (!next.right()) return pin;
+    // The end of a row that does not wrap ends a word too.
+    const crossed_row = next.at_break;
+    if (crossed_row and !next.right()) return pin;
+    const next_class = next.class();
+    if (next_class != .blank and (crossed_row or next_class != head_class)) w = next;
     const start_class = w.class();
     if (start_class != .blank) {
         while (true) {
@@ -1351,9 +1364,10 @@ test "Selection: move word_next selects the word and the blanks after it" {
     try testing.expectEqual(testScreen(0, 0), testPoint(&s, sel.start()));
     try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
 
-    // From a blank right before a word: stays.
+    // From a blank right before a word: that word and the blanks after
+    // it, so a repeated `w` moves on.
     sel.move(&s, .word_next, false, &test_word_boundaries);
-    try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
+    try testing.expectEqual(testScreen(9, 0), testPoint(&s, sel.end()));
 
     // The last word of a row: the end of the row, because the next word
     // is on the next row.
@@ -1365,6 +1379,26 @@ test "Selection: move word_next selects the word and the blanks after it" {
     sel.endPtr().* = s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
     sel.move(&s, .word_next, false, &test_word_boundaries);
     try testing.expectEqual(testScreen(0, 1), testPoint(&s, sel.end()));
+}
+
+test "Selection: move word_next goes on from the end of a row" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+    try s.testWriteString("ab\ncd ef");
+
+    const origin = s.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    var sel = Selection.init(origin, origin, false);
+    defer sel.deinit(&s);
+
+    // The last word of a row: the end of the row.
+    sel.move(&s, .word_next, false, &test_word_boundaries);
+    try testing.expectEqual(testScreen(9, 0), testPoint(&s, sel.end()));
+
+    // Again from the end of the row: the first word of the next row and
+    // the blank after it.
+    sel.move(&s, .word_next, false, &test_word_boundaries);
+    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
 }
 
 test "Selection: move word_end goes to the end of the word" {
@@ -1424,7 +1458,7 @@ test "Selection: move word motions treat a boundary run as a word" {
     const testing = std.testing;
     var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
     defer s.deinit();
-    try s.testWriteString("ab--cd");
+    try s.testWriteString("ab--cd ef");
 
     const origin = s.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
     var sel = Selection.init(origin, origin, false);
@@ -1441,6 +1475,13 @@ test "Selection: move word motions treat a boundary run as a word" {
     sel.endPtr().x = 0;
     sel.move(&s, .word_next, false, &test_word_boundaries);
     try testing.expectEqual(testScreen(1, 0), testPoint(&s, sel.end()));
+
+    // A repeated `w` moves on: to the end of the next run, then to the
+    // blank before the next word.
+    sel.move(&s, .word_next, false, &test_word_boundaries);
+    try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
+    sel.move(&s, .word_next, false, &test_word_boundaries);
+    try testing.expectEqual(testScreen(6, 0), testPoint(&s, sel.end()));
 }
 
 test "Selection: move line_start, line_end, top and bottom" {

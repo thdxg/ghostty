@@ -31,17 +31,17 @@ with tests. The Surface handlers hold the renderer mutex, make the
 selection at the cursor when there is none, and scroll the viewport
 after the head the way adjust_selection does.
 ---
- src/Surface.zig            | 116 ++++++++
- src/input/Binding.zig      | 114 ++++++++
+ src/Surface.zig            | 116 +++++++++
+ src/input/Binding.zig      | 114 +++++++++
  src/input/command.zig      |  11 +
- src/terminal/Selection.zig | 551 +++++++++++++++++++++++++++++++++++++
- 4 files changed, 792 insertions(+)
+ src/terminal/Selection.zig | 592 +++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 833 insertions(+)
 
 diff --git a/src/Surface.zig b/src/Surface.zig
-index 4a42e829d..d92863390 100644
+index f6fcd853d..b59d5750e 100644
 --- a/src/Surface.zig
 +++ b/src/Surface.zig
-@@ -5974,11 +5974,127 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool
+@@ -5999,11 +5999,127 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool
              screen.dirty.selection = true;
              try self.queueRender();
          },
@@ -338,10 +338,10 @@ index e75ede299..ef40e9654 100644
          // palette context.
          .toggle_command_palette,
 diff --git a/src/terminal/Selection.zig b/src/terminal/Selection.zig
-index 398496da6..08af208d7 100644
+index 398496da6..c9788d2ac 100644
 --- a/src/terminal/Selection.zig
 +++ b/src/terminal/Selection.zig
-@@ -510,6 +510,272 @@ pub fn adjust(
+@@ -510,6 +510,285 @@ pub fn adjust(
      }
  }
  
@@ -562,8 +562,21 @@ index 398496da6..08af208d7 100644
 +/// Helix `w`: the cell before the start of the next word. From inside a word
 +/// this is the last blank after it, so the selection covers the word and the
 +/// blanks that follow it. With no next word the head stays.
++///
++/// When the head is the last cell before a word (the cell that a `w` leaves
++/// it on, the end of a word with a boundary run after it, or the end of a row
++/// with a word at the start of the next row), the walk starts on that word,
++/// as in Helix. Without this a repeated `w` would not move.
 +fn wordNext(pin: Pin, boundary_codepoints: []const u21) Pin {
 +    var w = WordWalker.init(pin, boundary_codepoints);
++    const head_class = w.class();
++    var next = w;
++    if (!next.right()) return pin;
++    // The end of a row that does not wrap ends a word too.
++    const crossed_row = next.at_break;
++    if (crossed_row and !next.right()) return pin;
++    const next_class = next.class();
++    if (next_class != .blank and (crossed_row or next_class != head_class)) w = next;
 +    const start_class = w.class();
 +    if (start_class != .blank) {
 +        while (true) {
@@ -614,7 +627,7 @@ index 398496da6..08af208d7 100644
  test "Selection: adjust right" {
      const testing = std.testing;
      var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
-@@ -991,6 +1257,291 @@ test "Selection: adjust end of line" {
+@@ -991,6 +1270,319 @@ test "Selection: adjust end of line" {
      }
  }
  
@@ -712,9 +725,10 @@ index 398496da6..08af208d7 100644
 +    try testing.expectEqual(testScreen(0, 0), testPoint(&s, sel.start()));
 +    try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
 +
-+    // From a blank right before a word: stays.
++    // From a blank right before a word: that word and the blanks after
++    // it, so a repeated `w` moves on.
 +    sel.move(&s, .word_next, false, &test_word_boundaries);
-+    try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
++    try testing.expectEqual(testScreen(9, 0), testPoint(&s, sel.end()));
 +
 +    // The last word of a row: the end of the row, because the next word
 +    // is on the next row.
@@ -726,6 +740,26 @@ index 398496da6..08af208d7 100644
 +    sel.endPtr().* = s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
 +    sel.move(&s, .word_next, false, &test_word_boundaries);
 +    try testing.expectEqual(testScreen(0, 1), testPoint(&s, sel.end()));
++}
++
++test "Selection: move word_next goes on from the end of a row" {
++    const testing = std.testing;
++    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
++    defer s.deinit();
++    try s.testWriteString("ab\ncd ef");
++
++    const origin = s.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
++    var sel = Selection.init(origin, origin, false);
++    defer sel.deinit(&s);
++
++    // The last word of a row: the end of the row.
++    sel.move(&s, .word_next, false, &test_word_boundaries);
++    try testing.expectEqual(testScreen(9, 0), testPoint(&s, sel.end()));
++
++    // Again from the end of the row: the first word of the next row and
++    // the blank after it.
++    sel.move(&s, .word_next, false, &test_word_boundaries);
++    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
 +}
 +
 +test "Selection: move word_end goes to the end of the word" {
@@ -785,7 +819,7 @@ index 398496da6..08af208d7 100644
 +    const testing = std.testing;
 +    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
 +    defer s.deinit();
-+    try s.testWriteString("ab--cd");
++    try s.testWriteString("ab--cd ef");
 +
 +    const origin = s.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
 +    var sel = Selection.init(origin, origin, false);
@@ -802,6 +836,13 @@ index 398496da6..08af208d7 100644
 +    sel.endPtr().x = 0;
 +    sel.move(&s, .word_next, false, &test_word_boundaries);
 +    try testing.expectEqual(testScreen(1, 0), testPoint(&s, sel.end()));
++
++    // A repeated `w` moves on: to the end of the next run, then to the
++    // blank before the next word.
++    sel.move(&s, .word_next, false, &test_word_boundaries);
++    try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
++    sel.move(&s, .word_next, false, &test_word_boundaries);
++    try testing.expectEqual(testScreen(6, 0), testPoint(&s, sel.end()));
 +}
 +
 +test "Selection: move line_start, line_end, top and bottom" {
