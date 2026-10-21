@@ -64,10 +64,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # No version: setup-zig reads minimum_zig_version from build.zig.zon,
+      # so the build follows the Zig that upstream requires. A pinned
+      # version broke the first build after upstream moved to Zig 0.17.
       - name: Install Zig
         uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
 
       # -Dsentry=false: libghostty's Sentry crash reporter is built for the
       # standalone Ghostty.app, and it is actively harmful to an embedder.
