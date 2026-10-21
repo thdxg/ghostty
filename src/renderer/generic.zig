@@ -1736,17 +1736,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
-        /// Ease a `smooth-scroll-rows` viewport move toward its place: the
-        /// offset the surface left (`Surface.rowScrollOffset`) decays on the
-        /// region scroll animation's curve, so scrollback and a program's
-        /// own scrolled region move alike. It lives in the terminal, not
-        /// here, so the hit test, the cursor and selection all see what is
-        /// drawn without a copy of it. Called under the terminal lock before
-        /// the render state reads the offset.
+        /// Ease a `smooth-scroll-rows` viewport move, or a keyboard move
+        /// of the viewport (`Screen.viewport_offset_eases`), toward its
+        /// place: the offset the surface left (`Surface.rowScrollOffset`)
+        /// decays on the region scroll animation's curve, so scrollback and
+        /// a program's own scrolled region move alike. It lives in the
+        /// terminal, not here, so the hit test, the cursor and selection
+        /// all see what is drawn without a copy of it. Called under the
+        /// terminal lock before the render state reads the offset.
         fn decayViewportScroll(self: *Self, screen: *terminal.Screen) void {
             const offset = screen.viewport_pixel_offset;
             if (offset == 0) {
                 self.viewport_anim_tick = null;
+                screen.viewport_offset_eases = false;
                 return;
             }
             const now: std.Io.Timestamp = .now(global.io(), .awake);
@@ -1760,6 +1762,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const next = offset * @exp(-(dt_ns / std.time.ns_per_s) / region_anim_tau_s);
             if (@abs(next) < 0.5) {
                 screen.viewport_pixel_offset = 0;
+                screen.viewport_offset_eases = false;
                 self.viewport_anim_tick = null;
             } else {
                 screen.viewport_pixel_offset = next;
@@ -2279,7 +2282,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 //
                 // Smooth scrolling by rows: advance the viewport's move
                 // before the shift is resolved, so this frame draws it.
-                if (self.config.smooth_scroll and self.config.smooth_scroll_rows) {
+                //
+                // A keyboard move of the viewport (copy mode scrolling to
+                // its head) eases in the plain mode too: the surface flags
+                // its offset as a move, not a gesture remainder.
+                if (self.config.smooth_scroll and
+                    (self.config.smooth_scroll_rows or
+                        state.terminal.screens.active.viewport_offset_eases))
+                {
                     self.decayViewportScroll(state.terminal.screens.active);
                 } else {
                     self.viewport_anim_tick = null;

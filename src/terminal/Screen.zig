@@ -71,6 +71,14 @@ selection: ?Selection = null,
 /// (an offset pointing at a row that doesn't exist is drawn as zero).
 viewport_pixel_offset: f64 = 0,
 
+/// True while `viewport_pixel_offset` is a row-level move for the renderer
+/// to ease home, not the remainder of a wheel gesture: a keyboard move of
+/// the viewport under `smooth-scroll`, as copy mode makes when it scrolls
+/// to the selection head. The surface sets it with the offset. `scroll`
+/// and the scroll callback clear it, and the renderer clears it when the
+/// ease lands. Under `smooth-scroll-rows` every offset eases, flag or not.
+viewport_offset_eases: bool = false,
+
 /// Scrolls of a region of the alternate screen by whole rows that have
 /// happened since the renderer last looked (see `RegionScrolls`). With
 /// `smooth-scroll` on, the renderer animates them: the region's new
@@ -1756,8 +1764,10 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     defer self.assertIntegrity();
 
     // A row-level move invalidates any sub-row remainder; the scroll
-    // callback re-publishes its own remainder after the move.
+    // callback re-publishes its own remainder after the move, and a
+    // keyboard move its own eased offset.
     self.viewport_pixel_offset = 0;
+    self.viewport_offset_eases = false;
 
     if (comptime build_options.kitty_graphics) {
         // No matter what, scrolling marks our image state as dirty since
@@ -4052,6 +4062,17 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
             self.cursor.pending_wrap = true;
         }
     }
+}
+
+test "Screen viewport eases flag clears on a scroll" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.io, testing.allocator, .{ .cols = 10, .rows = 3, .max_scrollback_bytes = 1000 });
+    defer s.deinit();
+    s.viewport_pixel_offset = 12;
+    s.viewport_offset_eases = true;
+    s.scroll(.{ .top = {} });
+    try testing.expectEqual(0, s.viewport_pixel_offset);
+    try testing.expect(!s.viewport_offset_eases);
 }
 
 test "Screen forwards optional scrollback limits" {
