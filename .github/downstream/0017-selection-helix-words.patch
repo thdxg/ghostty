@@ -1,6 +1,6 @@
-From b0a37a6642573eb3f5d8237dd0bcac973facdf2c Mon Sep 17 00:00:00 2001
+From cad17bab2d90c7b517d1c04da893c25368eef7f0 Mon Sep 17 00:00:00 2001
 From: Ethan Lee <ethantlee21@gmail.com>
-Date: Wed, 21 Oct 2026 11:19:49 -0400
+Date: Wed, 21 Oct 2026 11:31:35 -0400
 Subject: [PATCH] input: select what a Helix word motion moves over, as Helix
  does
 
@@ -21,8 +21,8 @@ walks on as a cursor on a newline does in Helix.
  src/Surface.zig            |  22 ++
  src/input/Binding.zig      |  40 +++-
  src/input/command.zig      |   1 +
- src/terminal/Selection.zig | 471 ++++++++++++++++++++++++++-----------
- 4 files changed, 400 insertions(+), 134 deletions(-)
+ src/terminal/Selection.zig | 478 ++++++++++++++++++++++++++-----------
+ 4 files changed, 405 insertions(+), 136 deletions(-)
 
 diff --git a/src/Surface.zig b/src/Surface.zig
 index c4f5ad9d0..318b5bdb1 100644
@@ -156,7 +156,7 @@ index 594578682..aa9288662 100644
          .flip_selection,
          .select_line,
 diff --git a/src/terminal/Selection.zig b/src/terminal/Selection.zig
-index 21944dea0..6db797e7b 100644
+index 21944dea0..d4e88249b 100644
 --- a/src/terminal/Selection.zig
 +++ b/src/terminal/Selection.zig
 @@ -539,9 +539,10 @@ pub const Motion = enum {
@@ -495,22 +495,22 @@ index 21944dea0..6db797e7b 100644
 -            if (!w.right()) return pin;
 -            if (w.class() != start_class) break;
 -        }
--    }
--    while (w.class() == .blank) {
--        if (!w.right()) return pin;
 +    var walker = WordWalker.init(pin, boundary_codepoints, .right);
 +    const start_class = classAt(pin, boundary_codepoints);
 +    var step = walker.next() orelse return pin;
 +    if (!isWhitespace(start_class)) {
 +        while (step.class == start_class) step = walker.next() orelse return pin;
      }
+-    while (w.class() == .blank) {
+-        if (!w.right()) return pin;
+-    }
 -    return w.pin;
 +    while (isWhitespace(step.class)) step = walker.next() orelse return pin;
 +    return step.pin.?;
  }
  
  test "Selection: adjust right" {
-@@ -1414,16 +1452,17 @@ test "Selection: move word_next selects the word and the blanks after it" {
+@@ -1414,21 +1452,25 @@ test "Selection: move word_next selects the word and the blanks after it" {
      try testing.expectEqual(testScreen(0, 0), testPoint(&s, sel.start()));
      try testing.expectEqual(testScreen(3, 0), testPoint(&s, sel.end()));
  
@@ -532,9 +532,19 @@ index 21944dea0..6db797e7b 100644
 -    try testing.expectEqual(testScreen(9, 0), testPoint(&s, sel.end()));
 +    try testing.expectEqual(testScreen(6, 0), testPoint(&s, sel.end()));
  
-     // No next word: stays.
+-    // No next word: stays.
++    // The last word of the screen: its last cell, as Helix selects what is
++    // left of the text. From there, nothing moves.
      sel.endPtr().* = s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
-@@ -1441,12 +1480,12 @@ test "Selection: move word_next goes on from the end of a row" {
+     sel.move(&s, .word_next, false, &test_word_boundaries);
+-    try testing.expectEqual(testScreen(0, 1), testPoint(&s, sel.end()));
++    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
++    sel.move(&s, .word_next, false, &test_word_boundaries);
++    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
+ }
+ 
+ test "Selection: move word_next goes on from the end of a row" {
+@@ -1441,12 +1483,12 @@ test "Selection: move word_next goes on from the end of a row" {
      var sel = Selection.init(origin, origin, false);
      defer sel.deinit(&s);
  
@@ -551,7 +561,7 @@ index 21944dea0..6db797e7b 100644
      sel.move(&s, .word_next, false, &test_word_boundaries);
      try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
  }
-@@ -2429,3 +2468,169 @@ test "Selection: containedRow clamps mixed-width pages" {
+@@ -2429,3 +2471,169 @@ test "Selection: containedRow clamps mixed-width pages" {
      try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.start()));
      try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.end()));
  }

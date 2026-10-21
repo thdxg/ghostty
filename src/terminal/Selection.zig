@@ -1464,10 +1464,13 @@ test "Selection: move word_next selects the word and the blanks after it" {
     sel.move(&s, .word_next, false, &test_word_boundaries);
     try testing.expectEqual(testScreen(6, 0), testPoint(&s, sel.end()));
 
-    // No next word: stays.
+    // The last word of the screen: its last cell, as Helix selects what is
+    // left of the text. From there, nothing moves.
     sel.endPtr().* = s.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
     sel.move(&s, .word_next, false, &test_word_boundaries);
-    try testing.expectEqual(testScreen(0, 1), testPoint(&s, sel.end()));
+    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
+    sel.move(&s, .word_next, false, &test_word_boundaries);
+    try testing.expectEqual(testScreen(2, 1), testPoint(&s, sel.end()));
 }
 
 test "Selection: move word_next goes on from the end of a row" {
