@@ -3831,6 +3831,8 @@ pub fn scrollCallback(
                     self.mouse.pending_scroll_y
                 else
                     0;
+            // A wheel takes over from a keyboard move that is still easing.
+            screen.viewport_offset_eases = false;
         }
     }
 
@@ -6075,7 +6077,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             const sel = if (screen.selection) |*sel| sel else return false;
             sel.expandToLines(screen);
-            scrollToSelectionHead(screen, sel);
+            self.scrollToSelectionHead(screen, sel);
             screen.dirty.selection = true;
             try self.queueRender();
         },
@@ -6088,7 +6090,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             const sel = if (screen.selection) |*sel| sel else return false;
             sel.expandToLineBounds(screen);
-            scrollToSelectionHead(screen, sel);
+            self.scrollToSelectionHead(screen, sel);
             screen.dirty.selection = true;
             try self.queueRender();
         },
@@ -6175,7 +6177,7 @@ fn moveSelection(
         .top => .top,
         .bottom => .bottom,
     }, extend, self.config.selection_word_chars);
-    scrollToSelectionHead(screen, sel);
+    self.scrollToSelectionHead(screen, sel);
     screen.dirty.selection = true;
     try self.queueRender();
 }
@@ -6196,14 +6198,25 @@ fn selectWord(
         .end => .end,
         .prev => .prev,
     }, self.config.selection_word_chars);
-    scrollToSelectionHead(screen, sel);
+    self.scrollToSelectionHead(screen, sel);
     screen.dirty.selection = true;
     try self.queueRender();
 }
 
 /// Scroll the viewport so the selection head (`end`) is in it, the way
 /// `adjust_selection` follows its end. The renderer mutex must be held.
-fn scrollToSelectionHead(screen: *terminal.Screen, sel: *terminal.Selection) void {
+///
+/// With `smooth-scroll` on, the move eases: the viewport jumps by rows,
+/// and the content is drawn from where it was (`rowScrollOffset`) for the
+/// renderer to ease home (`decayViewportScroll`), as a wheel move does
+/// under `smooth-scroll-rows`. A page motion of copy mode then scrolls as
+/// Helix scrolls its own region, which is a region scroll that the same
+/// curve animates.
+fn scrollToSelectionHead(
+    self: *Surface,
+    screen: *terminal.Screen,
+    sel: *terminal.Selection,
+) void {
     const viewport_tl = screen.pages.getTopLeft(.viewport);
     const viewport_br = screen.pages.getBottomRight(.viewport).?;
     if (sel.end().isBetween(viewport_tl, viewport_br)) return;
@@ -6214,7 +6227,20 @@ fn scrollToSelectionHead(screen: *terminal.Screen, sel: *terminal.Selection) voi
         sel.end()
     else
         sel.end().up(screen.pages.rows - 1) orelse sel.end();
+
+    const drawn = screen.viewport_pixel_offset;
+    const before = screen.pages.scrollbar().offset;
     screen.scroll(.{ .pin = target });
+    if (!self.config.smooth_scroll) return;
+    const after = screen.pages.scrollbar().offset;
+    screen.viewport_pixel_offset = rowScrollOffset(
+        drawn,
+        before,
+        after,
+        @floatFromInt(self.size.cell.height),
+        screen.pages.rows,
+    );
+    screen.viewport_offset_eases = screen.viewport_pixel_offset != 0;
 }
 
 /// Returns true if performing the given action result in closing
