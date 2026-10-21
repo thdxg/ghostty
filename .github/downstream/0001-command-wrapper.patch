@@ -83,7 +83,7 @@ index 697f0a786..1df1fd89f 100644
 +                const alloc = config.arenaAlloc();
 +                const argv = try alloc.alloc([:0]const u8, opts.command_wrapper_count);
 +                for (c_wrapper[0..opts.command_wrapper_count], 0..) |arg, i| {
-+                    argv[i] = try alloc.dupeZ(u8, std.mem.sliceTo(arg, 0));
++                    argv[i] = try alloc.dupeSentinel(u8, std.mem.sliceTo(arg, 0), 0);
 +                }
 +                config.@"command-wrapper" = .{ .direct = argv };
 +            }
@@ -161,7 +161,7 @@ index df57e0f4f..c99845581 100644
 +
 +            var it = try wrapper.argIterator(alloc);
 +            defer it.deinit();
-+            while (it.next()) |arg| try list.append(alloc, try alloc.dupeZ(u8, arg));
++            while (it.next()) |arg| try list.append(alloc, try alloc.dupeSentinel(u8, arg, 0));
 +
 +            try list.appendSlice(alloc, base_args);
 +            break :wrap try list.toOwnedSlice(alloc);
