@@ -870,7 +870,7 @@ const Subprocess = struct {
 
             var it = try wrapper.argIterator(alloc);
             defer it.deinit();
-            while (it.next()) |arg| try list.append(alloc, try alloc.dupeZ(u8, arg));
+            while (it.next()) |arg| try list.append(alloc, try alloc.dupeSentinel(u8, arg, 0));
 
             try list.appendSlice(alloc, base_args);
             break :wrap try list.toOwnedSlice(alloc);

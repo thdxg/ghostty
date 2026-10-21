@@ -608,7 +608,7 @@ pub const Surface = struct {
                 const alloc = config.arenaAlloc();
                 const argv = try alloc.alloc([:0]const u8, opts.command_wrapper_count);
                 for (c_wrapper[0..opts.command_wrapper_count], 0..) |arg, i| {
-                    argv[i] = try alloc.dupeZ(u8, std.mem.sliceTo(arg, 0));
+                    argv[i] = try alloc.dupeSentinel(u8, std.mem.sliceTo(arg, 0), 0);
                 }
                 config.@"command-wrapper" = .{ .direct = argv };
             }
